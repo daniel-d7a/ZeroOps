@@ -54,7 +54,7 @@ GitHub deploys, custom domains, Redis add-on, database backups, rollbacks UI, me
 | Part | Choice | Notes |
 |---|---|---|
 | Control plane | NestJS (TypeScript, Express platform) | REST API under `/api`, session auth, publishes jobs |
-| Frontend | Vue 3, Vite, TypeScript, Pinia, Vue Router | Built to static files, served by an nginx container |
+| Frontend | Vue 3, Vite, TypeScript, Pinia, Vue Router | Built to static files, served by a Caddy container |
 | Worker | Go | Consumes `build` and `run` jobs |
 | Message broker | RabbitMQ 3.x with management plugin | Retries and dead-lettering |
 | Platform DB | Postgres 16 (`platform-db`) | Users, sessions, projects, deployments, logs, env vars |
@@ -94,7 +94,7 @@ platform/
     traefik.yml                # static config
   services/
     api/                       # NestJS, includes migrations and seed command
-    web/                       # Vue app, Dockerfile builds static files into nginx
+    web/                       # Vue app, Dockerfile builds static files into the Caddy image
     worker/                    # Go, Dockerfile includes docker CLI and nixpacks
   fixtures/                    # sample zips for tests (section 11)
   scripts/e2e.sh
@@ -107,7 +107,7 @@ platform/
 
 **Services in `docker-compose.yml`**
 - `traefik` (`container_name: traefik`): the only service publishing a host port (80). Docker provider enabled with `exposedbydefault=false` for platform services. File provider watching `/dynamic` for student apps. Docker socket mounted read-only. Dashboard disabled.
-- `web`: nginx serving the built Vue app.
+- `web`: Caddy serving the built Vue app.
 - `api`: NestJS. No Docker socket.
 - `worker`: Go. Run with `deploy: replicas: 2` (no `container_name`, so it can scale). Has the Docker socket, `uploads` (read-only), `traefik-dynamic` (read-write) and a `work` volume for build directories.
 - `platform-db`, `student-db` (`container_name: student-db`), `rabbitmq`, and a one-shot `migrate`.
@@ -375,7 +375,7 @@ Vue 3 with Vite, TypeScript, Pinia and Vue Router. The API client uses `credenti
 - **System:** worker list with last heartbeat and roles; counts of deployments by status.
 
 
-Serve the production build from the `web` container (nginx with security headers and SPA fallback). Add a Vitest test for the login flow. A Playwright smoke test (login, create project, upload) is optional.
+Serve the production build from the `web` container (Caddy with security headers and SPA fallback). Add a Vitest test for the login flow. A Playwright smoke test (login, create project, upload) is optional.
 
 
 ## 10. Security checklist (must pass before calling the MVP done)

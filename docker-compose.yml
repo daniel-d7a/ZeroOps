@@ -92,6 +92,19 @@ services:
       - edge
     restart: unless-stopped
 
+  web:
+    build:
+      context: ./services/web
+      target: prod
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.console-web.rule=Host(`console.localhost`)"
+      - "traefik.http.routers.console-web.entrypoints=web"
+      - "traefik.http.services.console-web.loadbalancer.server.port=80"
+    networks:
+      - edge
+    restart: unless-stopped
+
 networks:
   platform:
     name: platform

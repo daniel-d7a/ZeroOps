@@ -1,0 +1,16 @@
+# Static console (SPA) server. /api never reaches this file — Traefik routes
+# PathPrefix(/api) to the api container before nginx/caddy sees it.
+:80 {
+	root * /usr/share/caddy
+
+	# SPA fallback: unknown paths serve index.html (Vue Router handles them).
+	try_files {path} /index.html
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+	}
+
+	file_server
+}
