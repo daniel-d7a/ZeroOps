@@ -51,8 +51,11 @@ scripts/e2e.sh                          # full scenario suite (M7)
 docker compose logs -f api worker
 ```
 
-App URLs: console at `http://console.localhost`, student apps at `http://<slug>.localhost`.
-Traefik is the only published port (80).
+App URLs: console at `http://console.localhost:8080`, student apps at
+`http://<slug>.localhost:8080`. Traefik is the only published port — **8080**
+(host port 80 belongs to the host's Apache; Traefik listens on 80 *inside* its
+container). If port 80 ever becomes free, change the mapping to `80:80` in
+`docker-compose.yml` and drop the `:8080` suffixes.
 
 ## Invariants (never break these)
 

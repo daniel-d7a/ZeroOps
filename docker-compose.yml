@@ -57,13 +57,34 @@ services:
       - platform
     restart: unless-stopped
 
+  traefik:
+    image: traefik:v3
+    container_name: traefik
+    ports:
+      - "8080:80"   # host 80 is taken by Apache; apps live on <slug>.localhost:8080
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - traefik-dynamic:/dynamic
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "80"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    networks:
+      - edge
+    restart: unless-stopped
+
 networks:
   platform:
     name: platform
   db:
     name: db
+  edge:
+    name: edge
 
 volumes:
   platform-db-data:
   student-db-data:
   rabbitmq-data:
+  traefik-dynamic:

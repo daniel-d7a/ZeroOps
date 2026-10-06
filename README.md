@@ -22,9 +22,14 @@ cp .env.example .env      # then set the secrets
 docker compose up -d --build
 ```
 
-- Console: http://console.localhost
-- Student apps: http://<slug>.localhost
-- API: http://console.localhost/api (Swagger: `/api/docs`)
+- Console: http://console.localhost:8080
+- Student apps: http://<slug>.localhost:8080
+- API: http://console.localhost:8080/api (Swagger: `/api/docs`)
+
+> Port **8080**, not 80: the host runs Apache on port 80 (pulled in by
+> `libapache2-mod-php8.5`). Traefik still listens on 80 inside its container.
+> To move to port 80 later: `sudo systemctl disable --now apache2`, then change
+> the port mapping in `docker-compose.yml` to `80:80`.
 
 Development with hot reload:
 

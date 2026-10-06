@@ -1,0 +1,22 @@
+# Traefik static configuration.
+# Platform services (api, web) are routed by Docker labels; student apps are
+# routed by files the worker writes into /dynamic (plan §8.4).
+
+api:
+  dashboard: false
+
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: edge
+  file:
+    directory: /dynamic
+    watch: true
+
+log:
+  level: INFO
