@@ -1,0 +1,45 @@
+name: zeroops
+
+services:
+  platform-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${PLATFORM_DB_USER:-zeroops}
+      POSTGRES_PASSWORD: ${PLATFORM_DB_PASSWORD:?set PLATFORM_DB_PASSWORD in .env}
+      POSTGRES_DB: ${PLATFORM_DB_NAME:-zeroops}
+    volumes:
+      - platform-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PLATFORM_DB_USER:-zeroops} -d ${PLATFORM_DB_NAME:-zeroops}"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - platform
+    restart: unless-stopped
+
+  student-db:
+    image: postgres:16-alpine
+    container_name: student-db
+    environment:
+      POSTGRES_PASSWORD: ${STUDENT_DB_PASSWORD:?set STUDENT_DB_PASSWORD in .env}
+    volumes:
+      - student-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    networks:
+      - db
+    restart: unless-stopped
+
+networks:
+  platform:
+    name: platform
+  db:
+    name: db
+
+volumes:
+  platform-db-data:
+  student-db-data:
