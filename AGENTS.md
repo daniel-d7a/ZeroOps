@@ -20,7 +20,7 @@ design, this file wins for day-to-day conventions and commands.
 | Platform DB | Postgres 16 `platform-db` (users, projects, deployments, ...) |
 | Student DB | Postgres 16 `student-db` (only student databases) |
 | Proxy | Traefik v3 — Docker provider (platform, `exposedbydefault=false`), file provider (`/dynamic`, student apps) |
-| Builder | Nixpacks CLI inside the worker image, through the local Docker daemon |
+| Builder | Railpack CLI (successor to Nixpacks) inside the worker image, via the `buildkit` service (BuildKit) |
 | Docker access | Go SDK, worker only. Traefik gets the socket read-only |
 
 ## Commands
@@ -103,7 +103,7 @@ handling.
 - [ ] **M0** Scaffold — compose, infra healthy, migrate runs
 - [ ] **M1** Auth, users, projects — sessions, CSRF, roles, quotas, Swagger
 - [ ] **M2** Sources, upload, queue plumbing — fake build/run, retries, replicas
-- [ ] **M3** Real build — safe unzip, nixpacks, log streaming
+- [ ] **M3** Real build — safe unzip, railpack, log streaming
 - [ ] **M4** Real run — networks, container limits, health check, Traefik routing,
       stop/start/restart/redeploy
 - [ ] **M5** Database and env vars

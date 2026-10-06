@@ -27,7 +27,7 @@ A small Railway-like platform for student projects. A user signs up, creates a p
 - Accounts with session auth, roles `user` and `admin`
 - Projects (type `node` only; keep `type` as a column so Laravel can be added later)
 - Zip upload that creates a deployment; uploaded zips are stored and reusable
-- Build with Nixpacks, run as a resource-limited container, route by subdomain with Traefik
+- Build with Railpack (successor to Nixpacks, runs through a BuildKit container), run as a resource-limited container, route by subdomain with Traefik
 - Optional Postgres database per project (created on first deploy)
 - User-defined environment variables per project
 - Stop, start, restart (apply new env vars) and redeploy (rebuild from a stored zip)
@@ -60,7 +60,7 @@ GitHub deploys, custom domains, Redis add-on, database backups, rollbacks UI, me
 | Platform DB | Postgres 16 (`platform-db`) | Users, sessions, projects, deployments, logs, env vars |
 | Student DB server | Postgres 16 (`student-db`) | Only holds student project databases |
 | Reverse proxy | Traefik v3 | Docker provider for platform services, file provider for student apps |
-| Builder | Nixpacks CLI inside the worker image | Builds through the local Docker daemon |
+| Builder | Railpack CLI inside the worker image | Builds through the `buildkit` service (BuildKit); `BUILDKIT_HOST` env |
 | Docker access | Official Go SDK (`github.com/docker/docker/client`) | Worker only (Traefik gets a read-only socket) |
 
 
@@ -95,7 +95,7 @@ platform/
   services/
     api/                       # NestJS, includes migrations and seed command
     web/                       # Vue app, Dockerfile builds static files into the Caddy image
-    worker/                    # Go, Dockerfile includes docker CLI and nixpacks
+    worker/                    # Go, Dockerfile includes docker CLI and railpack
   fixtures/                    # sample zips for tests (section 11)
   scripts/e2e.sh
   README.md
@@ -110,7 +110,7 @@ platform/
 - `web`: Caddy serving the built Vue app.
 - `api`: NestJS. No Docker socket.
 - `worker`: Go. Run with `deploy: replicas: 2` (no `container_name`, so it can scale). Has the Docker socket, `uploads` (read-only), `traefik-dynamic` (read-write) and a `work` volume for build directories.
-- `platform-db`, `student-db` (`container_name: student-db`), `rabbitmq`, and a one-shot `migrate`.
+- `platform-db`, `student-db` (`container_name: student-db`), `rabbitmq`, `buildkit` (privileged, no host ports — Railpack's BuildKit daemon), and a one-shot `migrate`.
 
 
 **Fixed networks (give each an explicit `name:`)**
@@ -271,7 +271,7 @@ Admin routes use a roles guard. Pagination on all list endpoints.
 **Packages:** `config`, `queue`, `store`, `docker` (SDK wrapper behind an interface), `build`, `run`, `provision`, `network`, `routing`, `crypto`, `maintenance`.
 
 
-**Configuration (env):** `NODE_ID=node-1`, `WORKER_ROLES=build,run`, `BUILD_PREFETCH`, `RUN_PREFETCH`, `MAX_RUNNING_PER_NODE` (default 50), `BASE_DOMAIN`, `TRAEFIK_CONTAINER=traefik`, `STUDENT_DB_CONTAINER=student-db`, `DYNAMIC_CONFIG_DIR=/dynamic`, `UPLOADS_DIR`, `ENCRYPTION_KEY`, `PLATFORM_DB_URL`, `STUDENT_DB_ADMIN_URL`, `AMQP_URL`.
+**Configuration (env):** `NODE_ID=node-1`, `WORKER_ROLES=build,run`, `BUILD_PREFETCH`, `RUN_PREFETCH`, `MAX_RUNNING_PER_NODE` (default 50), `BASE_DOMAIN`, `TRAEFIK_CONTAINER=traefik`, `STUDENT_DB_CONTAINER=student-db`, `DYNAMIC_CONFIG_DIR=/dynamic`, `UPLOADS_DIR`, `ENCRYPTION_KEY`, `PLATFORM_DB_URL`, `STUDENT_DB_ADMIN_URL`, `AMQP_URL`, `BUILDKIT_HOST=docker-container://buildkit`.
 
 
 **Replicas:** the worker is stateless. Its id is its hostname. Replicas share one queue, so RabbitMQ distributes jobs automatically. Scale with `docker compose up --scale worker=N`. It must be correct with any number of replicas.
@@ -286,7 +286,7 @@ Admin routes use a roles guard. Pagination on all list endpoints.
 1. **Claim.** `UPDATE deployments SET status='building', worker_id=$2, heartbeat_at=now(), started_at=COALESCE(started_at, now()) WHERE id=$1 AND (status='queued' OR (status='building' AND heartbeat_at < now() - interval '2 minutes'))`. If zero rows: if the status is `built`, republish the `deploy` run job (the earlier publish may have failed) and ack; otherwise ack and skip. Update `heartbeat_at` every 15 seconds while working.
 2. **Load source.** Read the zip path from `sources`. If the file is missing or its `sha256` does not match, fail permanently.
 3. **Extract** into `/work/<deploymentId>` (delete first if it exists). Safe-unzip rules: reject path traversal and absolute paths, reject symlinks, max 5000 files, max 200 MB uncompressed. If there is a single top-level directory, use it as the root. Require `package.json` for type `node`.
-4. **Build.** Run `nixpacks build <dir> --name proj-<projectId>:<deploymentId>` with a 10-minute timeout. Stream stdout and stderr line by line into `deploy_logs` (stream `build`), batched about once per second. Skip the build if that image already exists.
+4. **Build.** Run `railpack build --name proj-<projectId>:<deploymentId> --progress plain <dir>` with a 10-minute timeout. Stream stdout and stderr line by line into `deploy_logs` (stream `build`), batched about once per second. Skip the build if that image already exists.
 5. **Finish.** Set `status='built'` and `image_ref`. Publish `{"type":"deploy","deployment_id":...}` to `run.x` with the project's `node_id` as the routing key. Delete the work directory. Ack.
 
 
@@ -394,6 +394,7 @@ Serve the production build from the `web` container (Caddy with security headers
 
 **Known limitations (document in the README)**
 - The worker holds the Docker socket, which is effectively root on the host. Keep its code small and reviewed. A socket proxy is a later hardening step.
+- The `buildkit` container runs privileged (required by BuildKit's build isolation). It gets no Docker socket and publishes no host ports.
 - `student-db` joins every project network that has a database; revisit when the number of projects reaches the hundreds.
 - No registry and a single machine: images and sources live on one host.
 - Build-time env vars are not supported.
@@ -450,7 +451,7 @@ Add unit tests for slug generation, safe-unzip, the claim queries, the retry dec
 *Done when:* uploads move through all statuses, a forced transient error retries 3 times then lands in the dead queue, duplicate delivery does no harm, and replicas share the load.
 
 
-**M3: Real build.** Safe unzip and Nixpacks build with log streaming in the build role.
+**M3: Real build.** Safe unzip and Railpack build with log streaming in the build role.
 *Done when:* `hello-node.zip` ends `built` with an image and complete build logs; `broken-build.zip` fails cleanly.
 
 
@@ -476,4 +477,4 @@ Add unit tests for slug generation, safe-unzip, the claim queries, the retry dec
 ## 14. Backlog (explicitly later)
 
 
-GitHub App deploys, rollbacks, change port, custom domains (Caddy on-demand TLS is an option), Redis add-on, database backups and restore, external database access, CPU and RAM metrics, automatic crash tracking and notifications, a registry and build workers on a separate machine, multiple runtime nodes, gVisor or Sysbox sandboxing, build-time env vars, disk usage quotas.
+GitHub App deploys, rollbacks, change port, custom domains (Caddy on-demand TLS is an option), Redis add-on, database backups and restore, external database access, CPU and RAM metrics, automatic crash tracking and notifications, a registry and build workers on a separate machine, multiple runtime nodes, gVisor or Sysbox sandboxing, build-time env vars, disk usage quotas, project type `dockerfile` (build a student's Dockerfile with the existing BuildKit service — fits the existing `projects.type` seam), project type `compose` (multi-container student apps — needs its own design: routing/port selection, managed-DB vs student-DB conflict, per-container limits, teardown).

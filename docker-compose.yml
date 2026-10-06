@@ -105,6 +105,40 @@ services:
       - edge
     restart: unless-stopped
 
+  # Railpack's BuildKit daemon — the worker builds student images through it.
+  buildkit:
+    image: moby/buildkit:buildx-stable-1
+    container_name: buildkit
+    privileged: true
+    healthcheck:
+      test: ["CMD-SHELL", "buildctl debug workers >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - platform
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./services/worker
+    environment:
+      NODE_ID: node-1
+      WORKER_ROLES: build,run
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      BUILDKIT_HOST: docker-container://buildkit
+    deploy:
+      replicas: 2
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - uploads:/data/uploads:ro
+      - traefik-dynamic:/dynamic
+      - work:/work
+    networks:
+      - platform
+      - db
+    restart: unless-stopped
+
 networks:
   platform:
     name: platform
@@ -118,3 +152,5 @@ volumes:
   student-db-data:
   rabbitmq-data:
   traefik-dynamic:
+  uploads:
+  work:
