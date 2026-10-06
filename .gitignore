@@ -1,0 +1,22 @@
+# secrets
+.env
+
+# dependencies
+node_modules/
+services/web/dist/
+services/api/dist/
+
+# go
+services/worker/worker
+services/worker/bin/
+
+# test / build scratch
+fixtures/*.zip
+fixtures/generated/
+work/
+*.log
+
+# editors
+.DS_Store
+.idea/
+.vscode/
