@@ -34,6 +34,29 @@ services:
       - db
     restart: unless-stopped
 
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    hostname: rabbitmq
+    command: ["rabbitmq-zeroops.sh"]
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-zeroops}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASSWORD:?set RABBITMQ_DEFAULT_PASSWORD in .env}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+      - ./rabbitmq/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./rabbitmq/definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./rabbitmq/entrypoint.sh:/usr/local/bin/rabbitmq-zeroops.sh:ro
+    ports:
+      - "127.0.0.1:15672:15672"
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmqctl list_queues --quiet name | grep -qx build.q"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks:
+      - platform
+    restart: unless-stopped
+
 networks:
   platform:
     name: platform
@@ -43,3 +66,4 @@ networks:
 volumes:
   platform-db-data:
   student-db-data:
+  rabbitmq-data:

@@ -1,0 +1,34 @@
+{
+  "exchanges": [
+    { "name": "build.x", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {} },
+    { "name": "build.retry.x", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {} },
+    { "name": "build.dead.x", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {} },
+    { "name": "run.x", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {} },
+    { "name": "run.retry.x", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {} },
+    { "name": "run.dead.x", "vhost": "/", "type": "direct", "durable": true, "auto_delete": false, "internal": false, "arguments": {} }
+  ],
+  "queues": [
+    { "name": "build.q", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {} },
+    { "name": "build.retry.q", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {
+      "x-message-ttl": 30000,
+      "x-dead-letter-exchange": "build.x",
+      "x-dead-letter-routing-key": "build"
+    } },
+    { "name": "build.dead.q", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {} },
+    { "name": "run.node-1.q", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {} },
+    { "name": "run.node-1.retry.q", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {
+      "x-message-ttl": 30000,
+      "x-dead-letter-exchange": "run.x",
+      "x-dead-letter-routing-key": "node-1"
+    } },
+    { "name": "run.dead.q", "vhost": "/", "durable": true, "auto_delete": false, "arguments": {} }
+  ],
+  "bindings": [
+    { "source": "build.x", "vhost": "/", "destination": "build.q", "destination_type": "queue", "routing_key": "build", "arguments": {} },
+    { "source": "build.retry.x", "vhost": "/", "destination": "build.retry.q", "destination_type": "queue", "routing_key": "build", "arguments": {} },
+    { "source": "build.dead.x", "vhost": "/", "destination": "build.dead.q", "destination_type": "queue", "routing_key": "build", "arguments": {} },
+    { "source": "run.x", "vhost": "/", "destination": "run.node-1.q", "destination_type": "queue", "routing_key": "node-1", "arguments": {} },
+    { "source": "run.retry.x", "vhost": "/", "destination": "run.node-1.retry.q", "destination_type": "queue", "routing_key": "node-1", "arguments": {} },
+    { "source": "run.dead.x", "vhost": "/", "destination": "run.dead.q", "destination_type": "queue", "routing_key": "node-1", "arguments": {} }
+  ]
+}
