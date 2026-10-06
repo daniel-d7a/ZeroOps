@@ -57,6 +57,14 @@ App URLs: console at `http://console.localhost:8080`, student apps at
 container). If port 80 ever becomes free, change the mapping to `80:80` in
 `docker-compose.yml` and drop the `:8080` suffixes.
 
+Scripts cannot resolve `console.localhost` / `<slug>.localhost` (the system
+resolver has no wildcard for `.localhost`; browsers do). In curl use:
+
+```sh
+curl --resolve console.localhost:8080:127.0.0.1 http://console.localhost:8080/api/health
+# or plain: curl -H 'Host: console.localhost' http://127.0.0.1:8080/api/health
+```
+
 ## Invariants (never break these)
 
 - **State ownership:** the worker writes deployment/project/action status transitions

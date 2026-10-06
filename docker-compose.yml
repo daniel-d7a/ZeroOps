@@ -75,6 +75,23 @@ services:
       - edge
     restart: unless-stopped
 
+  api:
+    build:
+      context: ./services/api
+      target: prod
+    environment:
+      PORT: 3000
+      NODE_ENV: production
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.console-api.rule=Host(`console.localhost`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.console-api.entrypoints=web"
+      - "traefik.http.services.console-api.loadbalancer.server.port=3000"
+    networks:
+      - platform
+      - edge
+    restart: unless-stopped
+
 networks:
   platform:
     name: platform

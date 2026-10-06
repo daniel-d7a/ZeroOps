@@ -1,0 +1,12 @@
+# Development overlay: hot reload for the API (and later the web app).
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+services:
+  api:
+    build:
+      context: ./services/api
+      target: dev
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ./services/api:/app
+      - /app/node_modules # keep the image's modules; host has none
