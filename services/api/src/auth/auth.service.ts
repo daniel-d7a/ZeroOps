@@ -51,7 +51,8 @@ export class AuthService {
     await new Promise<void>((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
     req.session.uid = user.id;
     req.session.startedAt = Date.now();
-    return publicUser(user);
+    req.session.csrf = randomBytes(32).toString('hex');
+    return { ...publicUser(user), csrfToken: req.session.csrf };
   }
 
   async logout(sess: ReqSession): Promise<void> {
@@ -66,6 +67,9 @@ export class AuthService {
       await new Promise<void>((resolve, reject) => sess.destroy((e) => (e ? reject(e) : resolve())));
       throw new UnauthorizedException();
     }
-    return publicUser(user);
+    // self-heal: sessions that predate a deploy may lack a token; the store's
+    // shouldSave (content hash) persists the mint on the way out.
+    sess.csrf ??= randomBytes(32).toString('hex');
+    return { ...publicUser(user), csrfToken: sess.csrf };
   }
 }

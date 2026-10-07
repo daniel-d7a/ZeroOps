@@ -6,5 +6,7 @@ declare module 'express-session' {
     uid?: string;
     /** login time, ms epoch — enforces the 30d absolute session cap (plan §7) */
     startedAt?: number;
+    /** CSRF token echoed in X-CSRF-Token on state-changing requests (plan §7) */
+    csrf?: string;
   }
 }
