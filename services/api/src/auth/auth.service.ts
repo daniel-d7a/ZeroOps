@@ -28,6 +28,7 @@ export class AuthService {
   constructor(@Inject(DRIZZLE) private readonly db: Db) {}
 
   async register(dto: RegisterDto) {
+    if (process.env.REGISTRATION_ENABLED === 'false') throw new ForbiddenException('registration disabled');
     // Hash before the conflict check so duplicate emails cost the same time
     // as new ones (no user-enumeration timing signal).
     const passwordHash = await hash(dto.password);

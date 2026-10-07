@@ -83,6 +83,9 @@ services:
       PORT: 3000
       NODE_ENV: production
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       PLATFORM_DB_URL: postgres://${PLATFORM_DB_USER:-zeroops}:${PLATFORM_DB_PASSWORD}@platform-db:5432/${PLATFORM_DB_NAME:-zeroops}
     depends_on:
       migrate:
