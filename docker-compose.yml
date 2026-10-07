@@ -86,6 +86,9 @@ services:
       REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
+      PUBLIC_PORT: ${PUBLIC_PORT:-8080}
+      MAX_PROJECTS_PER_USER: ${MAX_PROJECTS_PER_USER:-3}
       PLATFORM_DB_URL: postgres://${PLATFORM_DB_USER:-zeroops}:${PLATFORM_DB_PASSWORD}@platform-db:5432/${PLATFORM_DB_NAME:-zeroops}
     depends_on:
       migrate:

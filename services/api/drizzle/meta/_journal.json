@@ -15,6 +15,13 @@
       "when": 1791405384570,
       "tag": "0001_swift_lionheart",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791409282715,
+      "tag": "0002_slow_triathlon",
+      "breakpoints": true
     }
   ]
 }

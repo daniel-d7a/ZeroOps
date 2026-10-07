@@ -6,6 +6,7 @@ import { AuthModule } from './auth/auth.module';
 import { CsrfGuard } from './auth/csrf.guard';
 import { DbModule } from './db/db.module';
 import { HealthController } from './health.controller';
+import { ProjectsModule } from './projects/projects.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { HealthController } from './health.controller';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 100 }]), // moderate default; auth routes override to 10/min
     AuthModule,
     AdminModule,
+    ProjectsModule,
   ],
   controllers: [HealthController],
   providers: [
