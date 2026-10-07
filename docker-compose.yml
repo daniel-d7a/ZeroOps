@@ -89,10 +89,16 @@ services:
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       PUBLIC_PORT: ${PUBLIC_PORT:-8080}
       MAX_PROJECTS_PER_USER: ${MAX_PROJECTS_PER_USER:-3}
+      UPLOADS_DIR: /data/uploads
+      AMQP_URL: amqp://${RABBITMQ_DEFAULT_USER:-zeroops}:${RABBITMQ_DEFAULT_PASSWORD}@rabbitmq:5672
       PLATFORM_DB_URL: postgres://${PLATFORM_DB_USER:-zeroops}:${PLATFORM_DB_PASSWORD}@platform-db:5432/${PLATFORM_DB_NAME:-zeroops}
     depends_on:
       migrate:
         condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - uploads:/data/uploads
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.console-api.rule=Host(`console.localhost`) && PathPrefix(`/api`)"
