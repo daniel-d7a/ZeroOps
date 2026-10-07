@@ -1,8 +1,8 @@
-import { Transform } from 'class-transformer';
 import { IsEmail, IsString, MaxLength, MinLength } from 'class-validator';
+import { NormalizeEmail } from '../../common/normalize-email';
 
 export class RegisterDto {
-  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
+  @NormalizeEmail()
   @IsEmail()
   @MaxLength(254)
   email!: string;
