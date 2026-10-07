@@ -101,7 +101,7 @@ handling.
 ## Milestone checklist
 
 - [x] **M0** Scaffold — compose, infra healthy, migrate runs
-- [ ] **M1** Auth, users, projects — sessions, CSRF, roles, quotas, Swagger
+- [x] **M1** Auth, users, projects — sessions, CSRF, roles, quotas, Swagger
 - [ ] **M2** Sources, upload, queue plumbing — fake build/run, retries, replicas
 - [ ] **M3** Real build — safe unzip, railpack, log streaming
 - [ ] **M4** Real run — networks, container limits, health check, Traefik routing,

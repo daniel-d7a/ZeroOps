@@ -1,4 +1,5 @@
 import { Body, Controller, Get, HttpCode, Post, Req, UseGuards } from '@nestjs/common';
+import { ApiHeader, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { Request } from 'express';
 import { AuthService } from './auth.service';
@@ -6,6 +7,7 @@ import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { SessionGuard } from './session.guard';
 
+@ApiTags('auth')
 @Controller('auth')
 export class AuthController {
   constructor(private readonly auth: AuthService) {}
@@ -23,6 +25,7 @@ export class AuthController {
   }
 
   @Post('logout')
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
   @HttpCode(204)
   async logout(@Req() req: Request) {
     await this.auth.logout(req.session);

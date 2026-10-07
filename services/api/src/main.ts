@@ -1,4 +1,5 @@
 import { NestFactory } from '@nestjs/core';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import connectPgSimple from 'connect-pg-simple';
 import session from 'express-session';
 import { AppModule } from './app.module';
@@ -8,6 +9,9 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.enableShutdownHooks(); // close the HTTP server on SIGTERM (watch restarts, compose stop)
   app.setGlobalPrefix('api');
+
+  const swagger = new DocumentBuilder().setTitle('ZeroOps API').setVersion('1.0').build();
+  SwaggerModule.setup('api/docs', app, SwaggerModule.createDocument(app, swagger));
   // One hop (Traefik): express trusts its X-Forwarded-For hop only, so the
   // rightmost entry is the real client — required for per-IP rate limiting.
   app.getHttpAdapter().getInstance().set('trust proxy', 1);

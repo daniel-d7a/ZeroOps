@@ -1,16 +1,19 @@
 import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { ApiHeader, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 import { PageQueryDto } from '../common/page-query.dto';
 import { SessionGuard } from '../auth/session.guard';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { ProjectsService } from './projects.service';
 
+@ApiTags('projects')
 @Controller('projects')
 @UseGuards(SessionGuard)
 export class ProjectsController {
   constructor(private readonly projects: ProjectsService) {}
 
   @Post()
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
   create(@Body() dto: CreateProjectDto, @Req() req: Request) {
     return this.projects.create(req.session.uid!, dto);
   }
