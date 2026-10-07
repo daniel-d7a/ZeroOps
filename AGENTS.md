@@ -39,7 +39,7 @@ docker compose up -d --scale worker=3
 docker compose run --rm migrate
 
 # Generate migration SQL after editing services/api/src/db/schema.ts
-docker compose run --rm api npx drizzle-kit generate
+cd services/api && npm run db:generate   # needs a one-time host `npm install`
 
 # Tests
 cd services/worker && go test ./...     # Go unit tests
@@ -74,7 +74,7 @@ curl --resolve console.localhost:8080:127.0.0.1 http://console.localhost:8080/ap
   hardcode tags (`proj-<id>:<deploymentId>` is constructed in the build role and
   stored there, then read from there).
 - **Migrations are owned by the API** (drizzle). The Go worker has `MIN_SCHEMA_MIGRATION`
-  (minimum row count in `drizzle_migrations`) and refuses to run if the schema is older.
+  (minimum row count in `drizzle.__drizzle_migrations`) and refuses to run if the schema is older.
   All worker SQL lives in `services/worker/internal/store` only.
 - **404, not 403,** when a user asks for another user's resource. Admin routes use the
   roles guard and can read anything.
@@ -100,7 +100,7 @@ handling.
 
 ## Milestone checklist
 
-- [ ] **M0** Scaffold — compose, infra healthy, migrate runs
+- [x] **M0** Scaffold — compose, infra healthy, migrate runs
 - [ ] **M1** Auth, users, projects — sessions, CSRF, roles, quotas, Swagger
 - [ ] **M2** Sources, upload, queue plumbing — fake build/run, retries, replicas
 - [ ] **M3** Real build — safe unzip, railpack, log streaming

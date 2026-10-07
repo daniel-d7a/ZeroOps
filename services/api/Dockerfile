@@ -21,6 +21,7 @@ ENV NODE_ENV=production
 COPY package.json package-lock.json ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY drizzle ./drizzle
 RUN npm prune --omit=dev && npm cache clean --force
 EXPOSE 3000
 CMD ["node", "dist/main.js"]

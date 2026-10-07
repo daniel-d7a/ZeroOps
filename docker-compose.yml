@@ -82,6 +82,10 @@ services:
     environment:
       PORT: 3000
       NODE_ENV: production
+      PLATFORM_DB_URL: postgres://${PLATFORM_DB_USER:-zeroops}:${PLATFORM_DB_PASSWORD}@platform-db:5432/${PLATFORM_DB_NAME:-zeroops}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.console-api.rule=Host(`console.localhost`) && PathPrefix(`/api`)"
@@ -119,6 +123,23 @@ services:
       - platform
     restart: unless-stopped
 
+  # One-shot: applies SQL migrations, exits. api/worker start only if this
+  # exits 0 (fail-fast on a broken migration).
+  migrate:
+    build:
+      context: ./services/api
+      target: prod
+    command: ["node", "dist/db/migrate.js"]
+    environment:
+      NODE_ENV: production
+      PLATFORM_DB_URL: postgres://${PLATFORM_DB_USER:-zeroops}:${PLATFORM_DB_PASSWORD}@platform-db:5432/${PLATFORM_DB_NAME:-zeroops}
+    depends_on:
+      platform-db:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - platform
+
   worker:
     build:
       context: ./services/worker
@@ -127,6 +148,9 @@ services:
       WORKER_ROLES: build,run
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       BUILDKIT_HOST: docker-container://buildkit
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     deploy:
       replicas: 2
     volumes:

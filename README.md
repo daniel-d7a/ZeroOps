@@ -8,7 +8,7 @@ Spec: `plan.md`. Agent operating manual: `AGENTS.md`.
 
 ## Status
 
-Milestone **M0 (scaffold)** in progress. See the checklist in `AGENTS.md`.
+Milestone **M0 (scaffold)** done. Next: **M1 (auth, users, projects)**. See the checklist in `AGENTS.md`.
 
 ## Requirements
 

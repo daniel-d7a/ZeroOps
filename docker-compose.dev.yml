@@ -10,3 +10,4 @@ services:
     volumes:
       - ./services/api:/app
       - /app/node_modules # keep the image's modules; host has none
+      - /app/dist # tsc runs as root in here; don't root-own it on the host
