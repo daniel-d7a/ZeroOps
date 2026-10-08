@@ -8,7 +8,9 @@ Spec: `plan.md`. Agent operating manual: `AGENTS.md`.
 
 ## Status
 
-Milestone **M1 (auth, users, projects)** done. Next: **M2 (sources, upload, queue)**. See the checklist in `AGENTS.md`.
+Milestone **M2 (sources, upload, queue plumbing)** done — uploads run the full
+`queued → building → built → starting → live` pipeline with retries, a dead
+queue, and shared workers. Next: **M3 (real builds)**. See `AGENTS.md`.
 
 ## Requirements
 
