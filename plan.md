@@ -244,11 +244,11 @@ Everything is under `/api`. Provide Swagger at `/api/docs`.
 | `POST /projects/:id/deployments` | Multipart zip upload. Saves a source, creates a deployment, publishes a `build` job. |
 | `GET /projects/:id/deployments`, `GET /deployments/:id` | History and status |
 | `GET /deployments/:id/logs?after=<id>` | Log lines after a cursor id (clients poll) |
-| `POST /projects/:id/redeploy` | Body `{sourceId?}` (default: latest source). New deployment, rebuilds from the stored zip. |
+| `POST /projects/:id/redeploy` | Body `{sourceId?}` (default: latest source). New deployment, rebuilds from the stored zip. Fails with 404 if the source was pruned. |
 | `POST /projects/:id/stop`, `/start`, `/restart` | Create a `project_actions` row and publish a `run` job. Return the action id. |
 | `GET /projects/:id/actions` | Recent actions and results |
 | `GET /projects/:id/env`, `PUT /projects/:id/env/:key`, `DELETE /projects/:id/env/:key` | Environment variables |
-| `GET /projects/:id/sources`, `DELETE /projects/:id/sources/:sourceId` | Saved uploads (cannot delete the source of the live deployment) |
+| `GET /projects/:id/sources` | Saved uploads retained by the retention rule below (no manual delete — retention is the system's job) |
 | `GET /admin/users`, `PATCH /admin/users/:id` | List users; change `status` (`active` or `disabled`) |
 | `GET /admin/projects`, `POST /admin/projects/:id/stop` | All projects with owner and status; stop any project |
 | `GET /admin/workers`, `GET /admin/overview` | Worker heartbeats; counts of deployments by status |
@@ -260,8 +260,8 @@ Admin routes use a roles guard. Pagination on all list endpoints.
 **Rules**
 - Every query is scoped by the authenticated user. Return 404 (not 403) for other users' resources. Admins can read any project.
 - Upload: max 50 MB, check zip magic bytes, compute `sha256`, save to `/data/uploads/<projectId>/<sourceId>.zip`. Reject (409) if the project already has a deployment in `queued`, `building`, `built` or `starting`.
-- Quotas (configurable): max 3 projects per user, max 500 MB of stored sources per user, max 50 env vars per project.
-- Retention: keep the newest 5 sources per project plus the source of the live deployment. A nightly cron (`@nestjs/schedule`) deletes older files and sets `deleted_at`.
+- Quotas (configurable): max 3 projects per user, max 50 env vars per project. (Count-based retention below already bounds stored sources at 5 × 50 MB per project — no separate byte quota needed.)
+- Retention: keep the sources of the newest 5 deployments per project, plus the source of the live deployment and any in-flight one (never unlink a file mid-build). Pruning runs inline on every successful new upload: unlink the file and set `deleted_at` (rows stay — `deployments.source_id` references them and history must remain readable; the API lists only unpruned sources). Redeploy from a pruned source → 404.
 - Env var rules: key matches `^[A-Z_][A-Z0-9_]*$`, max 128 characters; value max 4 KB; reserved keys `PORT` and `DATABASE_URL` cannot be set. Encrypt values with AES-256-GCM using `ENCRYPTION_KEY`. Return values only to the owner (and admin), and never log them. Changing env vars does not affect a running container; the UI shows "restart required".
 
 
@@ -421,7 +421,7 @@ Scenario tests:
 - **Idempotency:** deliver the same message twice, and kill a worker mid-build and mid-deploy. Expect exactly one container and a correct final state.
 - **Retry:** force a transient error. Expect 3 attempts, then a message in the dead queue.
 - **Sessions:** CSRF rejection, logout invalidation, disabled user loses access immediately.
-- **Quotas and retention:** project limit, storage limit, old sources pruned.
+- **Quotas and retention:** project limit, env-var limit, sources pruned per the §7 rule (files actually deleted, newest 5 deployments + live + in-flight kept).
 
 
 Add unit tests for slug generation, safe-unzip, the claim queries, the retry decision, env var validation and encryption.

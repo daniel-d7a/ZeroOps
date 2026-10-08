@@ -160,31 +160,4 @@ export class DeploymentsService {
     ]);
     return { items, total: Number(count) };
   }
-
-  /** Soft-delete a saved upload; refuses while a live/in-flight deployment needs the file. */
-  async deleteSource(projectId: string, userId: string, sourceId: string) {
-    await this.assertOwned(projectId, userId);
-    const [source] = await this.db
-      .select({ id: sources.id })
-      .from(sources)
-      .where(and(eq(sources.id, sourceId), eq(sources.projectId, projectId), isNull(sources.deletedAt)))
-      .limit(1);
-    if (!source) throw new NotFoundException('source not found');
-
-    // plan §7: never the source of the live deployment; also block in-flight
-    // ones (M3+ would unzip a file the platform is about to read)
-    const [inUse] = await this.db
-      .select({ id: deployments.id })
-      .from(deployments)
-      .where(
-        and(
-          eq(deployments.sourceId, sourceId),
-          inArray(deployments.status, [...ACTIVE_STATUSES, 'live']),
-        ),
-      )
-      .limit(1);
-    if (inUse) throw new ConflictException('source is in use by a live or in-flight deployment');
-
-    await this.db.update(sources).set({ deletedAt: new Date() }).where(eq(sources.id, sourceId));
-  }
 }

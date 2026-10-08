@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiConsumes, ApiHeader, ApiTags } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
@@ -67,17 +67,6 @@ export class ProjectsController {
   @Get(':id/sources')
   listSources(@Param('id', ParseUUIDPipe) id: string, @Query() query: PageQueryDto, @Req() req: Request) {
     return this.deployments.listSources(id, req.session.uid!, query);
-  }
-
-  @Delete(':id/sources/:sourceId')
-  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
-  @HttpCode(204)
-  deleteSource(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Param('sourceId', ParseUUIDPipe) sourceId: string,
-    @Req() req: Request,
-  ) {
-    return this.deployments.deleteSource(id, req.session.uid!, sourceId);
   }
 
   @Get(':id')
