@@ -167,6 +167,15 @@ export const projectActions = pgTable(
   ],
 );
 
+/** Worker heartbeats (plan §5): id = hostname, last_seen_at upserted every 15s. */
+export const workers = pgTable('workers', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  roles: text('roles').array().notNull(),
+  nodeId: varchar('node_id', { length: 63 }).notNull(),
+  startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
 // express-session store (connect-pg-simple): sid/sess/expire column names are
 // its API — do not rename.
 export const sessions = pgTable(

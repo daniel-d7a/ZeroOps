@@ -161,9 +161,17 @@ services:
       WORKER_ROLES: build,run
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       BUILDKIT_HOST: docker-container://buildkit
+      AMQP_URL: amqp://${RABBITMQ_DEFAULT_USER:-zeroops}:${RABBITMQ_DEFAULT_PASSWORD}@rabbitmq:5672
+      PLATFORM_DB_URL: postgres://${PLATFORM_DB_USER:-zeroops}:${PLATFORM_DB_PASSWORD}@platform-db:5432/${PLATFORM_DB_NAME:-zeroops}
+      BUILD_PREFETCH: 1
+      RUN_PREFETCH: 4
     depends_on:
       migrate:
         condition: service_completed_successfully
+      platform-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     deploy:
       replicas: 2
     volumes:
