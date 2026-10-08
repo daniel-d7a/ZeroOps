@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { boolean, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid, varchar, type AnyPgColumn } from 'drizzle-orm/pg-core';
+import { boolean, bigserial, index, integer, jsonb, pgEnum, pgTable, text, timestamp, uniqueIndex, uuid, varchar, type AnyPgColumn } from 'drizzle-orm/pg-core';
 
 export const userRole = pgEnum('user_role', ['user', 'admin']);
 export const userStatus = pgEnum('user_status', ['active', 'disabled']);
@@ -186,4 +186,23 @@ export const sessions = pgTable(
     expire: timestamp('expire', { withTimezone: true }).notNull(),
   },
   (t) => [index('sessions_expire_idx').on(t.expire)],
+);
+
+/**
+ * Build/system log lines (plan §5): append-only, read with a cursor
+ * (`GET /deployments/:id/logs?after=<id>`). bigserial id doubles as the
+ * cursor — monotonic, so a poll never misses or repeats a line.
+ */
+export const deployLogs = pgTable(
+  'deploy_logs',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    deploymentId: uuid('deployment_id')
+      .notNull()
+      .references(() => deployments.id),
+    stream: text('stream').notNull(), // 'build' | 'system' (plan §5)
+    line: text('line').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('deploy_logs_deployment_idx').on(t.deploymentId, t.id)],
 );

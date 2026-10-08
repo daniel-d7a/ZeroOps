@@ -8,19 +8,20 @@ import {
   NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fromFile } from 'file-type';
 import { DRIZZLE, Db } from '../db/db.module';
-import { deployments, publicDeploymentColumns, publicSourceColumns, projects, sources } from '../db/schema';
+import { deployLogs, deployments, publicDeploymentColumns, publicSourceColumns, projects, sources } from '../db/schema';
 import { PageQueryDto } from '../common/page-query.dto';
 import { PublisherService } from '../queue/publisher.service';
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // plan §7: 50 MB
 const RETAIN_DEPLOYMENTS = 5; // plan §7 retention: newest N sources kept
+const LOGS_PAGE_SIZE = 500; // one poll batch; clients chain with ?after=
 const uploadsRoot = (): string => process.env.UPLOADS_DIR ?? '/data/uploads';
 const ACTIVE_STATUSES = ['queued', 'building', 'built', 'starting'] as const;
 
@@ -202,6 +203,27 @@ export class DeploymentsService {
       .limit(1);
     if (!row) throw new NotFoundException('deployment not found');
     return row;
+  }
+
+  /**
+   * Log lines after a cursor (plan §7): clients poll `?after=<last id>` every
+   * 2-3s while a deployment runs. bigserial ids make the cursor gap-free.
+   * Ownership = same 404 rule as getDeployment (reused, so it can't drift).
+   */
+  async listLogs(userId: string, deploymentId: string, after: number) {
+    await this.getDeployment(userId, deploymentId);
+    const items = await this.db
+      .select({
+        id: deployLogs.id,
+        stream: deployLogs.stream,
+        line: deployLogs.line,
+        createdAt: deployLogs.createdAt,
+      })
+      .from(deployLogs)
+      .where(and(eq(deployLogs.deploymentId, deploymentId), gt(deployLogs.id, after)))
+      .orderBy(asc(deployLogs.id))
+      .limit(LOGS_PAGE_SIZE);
+    return { items, nextAfter: items.length ? items[items.length - 1]!.id : after };
   }
 
   async listSources(projectId: string, userId: string, query: PageQueryDto) {
