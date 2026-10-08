@@ -4,6 +4,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
@@ -19,6 +20,7 @@ import { PageQueryDto } from '../common/page-query.dto';
 import { PublisherService } from '../queue/publisher.service';
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // plan §7: 50 MB
+const RETAIN_DEPLOYMENTS = 5; // plan §7 retention: newest N sources kept
 const uploadsRoot = (): string => process.env.UPLOADS_DIR ?? '/data/uploads';
 const ACTIVE_STATUSES = ['queued', 'building', 'built', 'starting'] as const;
 
@@ -30,6 +32,8 @@ async function sha256File(filePath: string): Promise<string> {
 
 @Injectable()
 export class DeploymentsService {
+  private readonly logger = new Logger(DeploymentsService.name);
+
   constructor(
     @Inject(DRIZZLE) private readonly db: Db,
     private readonly publisher: PublisherService,
@@ -109,10 +113,67 @@ export class DeploymentsService {
         throw new BadGatewayException('could not queue the build job');
       }
 
+      // Retention runs inline on every successful upload (plan §7) — never
+      // fails the request: the deploy already happened, a prune problem is a
+      // storage leak to warn about, not a 500 to show the user.
+      await this.pruneOldSources(projectId).catch((err) =>
+        this.logger.warn(`source prune failed for project ${projectId}: ${err instanceof Error ? err.message : err}`),
+      );
+
       return deployment;
     } finally {
       await unlink(tmp).catch(() => {}); // no-op once renamed away
     }
+  }
+
+  /**
+   * Retention (plan §7): keep the sources of the newest RETAIN_DEPLOYMENTS
+   * deployments, plus the live deployment's source and any in-flight one
+   * (never unlink a file mid-build) — unlink + soft-delete everything else.
+   *
+   * Rows stay: deployments.source_id FKs them and history must remain
+   * readable; listSources already filters deleted_at, and a redeploy from a
+   * pruned source must 404 (guard lands with the redeploy endpoint, M4).
+   *
+   * Order per source: file first, then the row — a crash in between leaves an
+   * unpruned row whose file is already gone, which the next prune retries
+   * (unlink ENOENT ignored); the reverse order would leak orphan files forever.
+   * Idempotent, so the retry is safe.
+   */
+  private async pruneOldSources(projectId: string) {
+    const [newest, inUse, candidates] = await Promise.all([
+      this.db
+        .select({ sourceId: deployments.sourceId })
+        .from(deployments)
+        .where(eq(deployments.projectId, projectId))
+        .orderBy(desc(deployments.createdAt), desc(deployments.id)) // id: deterministic tie-break
+        .limit(RETAIN_DEPLOYMENTS),
+      this.db
+        .select({ sourceId: deployments.sourceId })
+        .from(deployments)
+        .where(
+          and(
+            eq(deployments.projectId, projectId),
+            inArray(deployments.status, ['live', ...ACTIVE_STATUSES]),
+          ),
+        ),
+      this.db
+        .select({ id: sources.id, path: sources.path })
+        .from(sources)
+        .where(and(eq(sources.projectId, projectId), isNull(sources.deletedAt))),
+    ]);
+
+    const keep = new Set<string>([...newest, ...inUse].map((row) => row.sourceId));
+    const prunable = candidates.filter((source) => !keep.has(source.id));
+    if (prunable.length === 0) return;
+
+    for (const source of prunable) {
+      await unlink(path.join(uploadsRoot(), source.path)).catch(() => {}); // ENOENT = already gone
+    }
+    await this.db
+      .update(sources)
+      .set({ deletedAt: new Date() })
+      .where(and(inArray(sources.id, prunable.map((source) => source.id)), isNull(sources.deletedAt)));
   }
 
   async listDeployments(projectId: string, userId: string, query: PageQueryDto) {
