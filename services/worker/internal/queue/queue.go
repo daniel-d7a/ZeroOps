@@ -155,6 +155,106 @@ func (c *Conn) PublishDeploy(ctx context.Context, nodeID, deploymentID string) e
 	return nil
 }
 
+// MaxAttempts is the total number of deliveries a transient job gets before
+// it gives up (plan §6: "publish with an incremented attempt header... at
+// attempt 3, mark failed, publish to the dead exchange, ack"). Attempt counts
+// retries already done: deliveries carry 0 (first), 1, 2 → dead on the third.
+const MaxAttempts = 3
+
+// ReadAttempt returns how many times this message has already been retried
+// (0 on its first delivery). AMQP headers arrive as Go integers of varying
+// width depending on how they were encoded, so accept all of them.
+func ReadAttempt(delivery amqp091.Delivery) int64 {
+	value, ok := delivery.Headers["attempt"]
+	if !ok {
+		return 0
+	}
+	switch v := value.(type) {
+	case int64:
+		return v
+	case int32:
+		return int64(v)
+	case int16:
+		return int64(v)
+	case uint8:
+		return int64(v)
+	default:
+		return 0
+	}
+}
+
+// RetryOrGiveUp applies the plan §6 transient rule: either hand the message
+// to the retry exchange (TTL 30 s → dead-letters back to the main exchange,
+// so it later redelivers with attempt+1) or — once MaxAttempts is reached —
+// park it in the dead exchange.
+//
+// Returns gaveUp=true when the message was dead-lettered; the caller must then
+// mark the job failed in the DB (the message is the ops artifact, the DB row
+// is the product state). Both paths confirm before returning so a nil error
+// means the broker durably has the message.
+func (c *Conn) RetryOrGiveUp(ctx context.Context, domain string, delivery amqp091.Delivery, cause string) (gaveUp bool, err error) {
+	nextAttempt := ReadAttempt(delivery) + 1
+	if nextAttempt >= MaxAttempts {
+		return true, c.PublishDead(ctx, domain, delivery, cause)
+	}
+	return false, c.PublishRetry(ctx, domain, delivery, nextAttempt)
+}
+
+// PublishRetry republishes the original body to <domain>.retry.x (bound to
+// the TTL queue that dead-letters back into the main exchange with the same
+// routing key) with the attempt counter bumped.
+func (c *Conn) PublishRetry(ctx context.Context, domain string, delivery amqp091.Delivery, attempt int64) error {
+	headers := cloneHeaders(delivery.Headers)
+	headers["attempt"] = attempt
+	return c.republish(ctx, domain+".retry.x", delivery, headers)
+}
+
+// PublishDead parks the message in <domain>.dead.x ("inspection only",
+// plan §6) with the failure reason header — body preserved verbatim, which is
+// what makes it the right destination for malformed messages: nothing was
+// parsed, nothing was recorded anywhere else, so keep the raw payload.
+func (c *Conn) PublishDead(ctx context.Context, domain string, delivery amqp091.Delivery, reason string) error {
+	if len(reason) > 500 {
+		reason = reason[:500] // headers are not logs; keep them bounded
+	}
+	headers := cloneHeaders(delivery.Headers)
+	headers["x-failure-reason"] = reason
+	return c.republish(ctx, domain+".dead.x", delivery, headers)
+}
+
+// republish sends the body unchanged to an exchange under the same routing
+// key it arrived with, so the retry/dead bindings route it exactly like the
+// original message would. mandatory + persistent + confirmed, same as every
+// other publish (package docs).
+func (c *Conn) republish(ctx context.Context, exchange string, delivery amqp091.Delivery, headers amqp091.Table) error {
+	deferredConfirm, err := c.publishChannel.PublishWithDeferredConfirmWithContext(ctx, exchange, delivery.RoutingKey, true, false, amqp091.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp091.Persistent,
+		MessageId:    delivery.MessageId,
+		Headers:      headers,
+		Body:         delivery.Body,
+	})
+	if err != nil {
+		return fmt.Errorf("republish to %s: %w", exchange, err)
+	}
+	confirmed, err := deferredConfirm.WaitContext(ctx)
+	if err != nil {
+		return fmt.Errorf("wait for confirm: %w", err)
+	}
+	if !confirmed {
+		return fmt.Errorf("republish to %s not confirmed", exchange)
+	}
+	return nil
+}
+
+func cloneHeaders(original amqp091.Table) amqp091.Table {
+	headers := make(amqp091.Table, len(original)+1)
+	for key, value := range original {
+		headers[key] = value
+	}
+	return headers
+}
+
 // Close tears down the channels and connection. Anything still unacked is
 // requeued by the broker — that is the safety net behind every crash and
 // every graceful shutdown.

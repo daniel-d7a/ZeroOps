@@ -27,6 +27,7 @@ type Config struct {
 	BuildPrefetch      int // unacked build jobs allowed at once (heavy → 1)
 	RunPrefetch        int // unacked run jobs allowed at once (light → 4)
 	MinSchemaMigration int
+	ForceTransient     bool // test hook: every build job fails transiently (plan §11 gate)
 }
 
 // Roles the worker understands. Anything else in WORKER_ROLES is a typo and
@@ -79,6 +80,17 @@ func Load() (Config, error) {
 	}
 	if workerConfig.PlatformDBURL = strings.TrimSpace(os.Getenv("PLATFORM_DB_URL")); workerConfig.PlatformDBURL == "" {
 		return Config{}, fmt.Errorf("PLATFORM_DB_URL is not set")
+	}
+
+	// FORCE_TRANSIENT: gate test hook (plan §11 "force a transient error").
+	// Unset/empty is the normal case; a typo must error, not silently disable.
+	switch strings.ToLower(envOr("FORCE_TRANSIENT", "")) {
+	case "", "0", "false", "no", "off":
+		workerConfig.ForceTransient = false
+	case "1", "true", "yes", "on":
+		workerConfig.ForceTransient = true
+	default:
+		return Config{}, fmt.Errorf("FORCE_TRANSIENT must be a boolean, got %q", os.Getenv("FORCE_TRANSIENT"))
 	}
 	return workerConfig, nil
 }

@@ -103,10 +103,11 @@ func main() {
 	}
 
 	buildRole := &build.Handler{
-		Store:    datastore,
-		Broker:   broker,
-		WorkerID: workerID,
-		Logger:   logger,
+		Store:          datastore,
+		Broker:         broker,
+		WorkerID:       workerID,
+		Logger:         logger,
+		ForceTransient: cfg.ForceTransient,
 	}
 	if cfg.HasRole("build") {
 		buildDeliveries, err := broker.ConsumeBuild(cfg.BuildPrefetch)
@@ -119,7 +120,7 @@ func main() {
 	}
 
 	if cfg.HasRole("run") {
-		runRole := &run.Handler{Store: datastore, WorkerID: workerID, Logger: logger}
+		runRole := &run.Handler{Store: datastore, Broker: broker, WorkerID: workerID, Logger: logger}
 		runQueueName := "run." + cfg.NodeID + ".q"
 		runDeliveries, err := broker.ConsumeRun(cfg.NodeID, cfg.RunPrefetch)
 		if err != nil {
@@ -134,22 +135,19 @@ func main() {
 	consumeLoops.Wait()
 }
 
-// deliveryHandler processes exactly one message. Its three outcomes are the
-// whole manual-ack contract (AGENTS invariant: ack only after the final DB
-// write — never before, or a crash would lose the job):
+// deliveryHandler processes exactly one message. All failure classification
+// (plan §6: malformed → dead exchange, transient → retry exchange ×3 → dead,
+// permanent → DB failure + ack) happens INSIDE the handler, so its contract
+// is just two outcomes — which keeps the ack rule trivial to audit:
 //
-//	ack=true, requeue=false, err=nil  → message is finished (processed or
-//	                                    deliberately skipped: duplicates and
-//	                                    malformed input are acked so they are
-//	                                    never redelivered)
-//	ack=false, requeue=true, err=nil  → transient condition; put the message
-//	                                    back on the queue for a later attempt
-//	                                    (step 21 routes this through a retry
-//	                                    exchange with TTL instead of a hot loop)
-//	ack=false, requeue=false, err!=nil → infrastructure is broken; we crash
-//	                                    (os.Exit) and let the broker requeue
-//	                                    the unacked message + compose restart us
-type deliveryHandler func(context.Context, amqp091.Delivery) (ack, requeue bool, err error)
+//	err == nil  → main acks. Safe because the handler only returns nil after
+//	              the message is finished, deliberately skipped, handed to the
+//	              retry exchange, or dead-lettered — and any DB failure record
+//	              was written BEFORE the ack (AGENTS: ack after final write).
+//	err != nil → infrastructure is broken; main crashes (os.Exit). The unacked
+//	              message requeues via the broker and compose restarts us;
+//	              in-flight jobs interrupted by shutdown are nacked-requeue.
+type deliveryHandler func(context.Context, amqp091.Delivery) error
 
 // consumeLoop owns one queue: receive a delivery, hand it to the role's
 // handler, translate the handler's answer into an ack/nack. It runs until the
@@ -173,7 +171,7 @@ func consumeLoop(ctx context.Context, queueName string, deliveries <-chan amqp09
 				os.Exit(1)
 			}
 
-			ack, requeue, err := handleDelivery(ctx, delivery)
+			err := handleDelivery(ctx, delivery)
 			if err != nil {
 				if ctx.Err() != nil {
 					// We were interrupted mid-job (shutdown raced the work):
@@ -188,20 +186,11 @@ func consumeLoop(ctx context.Context, queueName string, deliveries <-chan amqp09
 				os.Exit(1)
 			}
 
-			switch {
-			case ack:
-				// Final DB write already happened — safe to forget the message.
-				if err := delivery.Ack(false); err != nil {
-					logger.Error("ack failed", "queue", queueName, "error", err)
-					os.Exit(1)
-				}
-			case requeue:
-				// Transient: hand it back to the broker (multiple=false — only
-				// this delivery) so a later attempt can pick it up.
-				if err := delivery.Nack(false, true); err != nil {
-					logger.Error("nack failed", "queue", queueName, "error", err)
-					os.Exit(1)
-				}
+			// Handler returned nil = fully handled (finished, skipped, retried
+			// or dead-lettered) — the ack that closes the message's life.
+			if err := delivery.Ack(false); err != nil {
+				logger.Error("ack failed", "queue", queueName, "error", err)
+				os.Exit(1)
 			}
 		}
 	}

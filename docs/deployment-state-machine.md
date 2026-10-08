@@ -29,13 +29,13 @@ stateDiagram-v2
     queued --> failed: API · uploadZip compensation (publishBuild failed)
 
     building --> built: worker build · Handle -> MarkBuilt + PublishDeploy
-    building --> failed: permanent build error (step 21, not yet)
+    building --> failed: worker build · retries exhausted -> MarkFailed + dead queue
 
     built --> starting: worker run · Handle -> ClaimRun (after TryProjectLock)
     built --> built: duplicate build msg -> republish deploy job (repair)
 
     starting --> live: worker run · Handle -> MarkLive (one tx)
-    starting --> failed: permanent deploy error (step 21, not yet)
+    starting --> failed: worker run · retries exhausted -> MarkFailed + dead queue
 
     live --> superseded: MarkLive of a newer deploy (same tx)
 
@@ -112,7 +112,9 @@ flowchart LR
 | `built → starting` | worker · run | `Handler.Handle` → `store.ClaimRun` | `internal/run/run.go`, `internal/store/store.go` |
 | `starting → live` + `live → superseded` + project `running` | worker · run | `store.MarkLive` (one tx, CAS) | `internal/store/store.go` |
 | steal (re-enter `building`/`starting`) | worker | claim `WHERE heartbeat_at < now() - interval '2 minutes'` | `internal/store/store.go` |
-| `→ failed` (permanent job error) | worker | attempt classification — **step 21, not implemented yet** | — |
+| `→ failed` (retries exhausted) | worker | `Handler.transient` → `queue.RetryOrGiveUp` (attempt ×3) → `store.MarkFailed` | `internal/build|run/build.go|run.go`, `internal/queue/queue.go`, `internal/store/store.go` |
+| `→ failed` (permanent, no transition yet) | worker | detectors land with real builds (M3) / run (M4) — same `MarkFailed` path | — |
+| malformed message (no state change) | worker | `Handler.dead` → `queue.PublishDead` (raw payload kept) | `internal/build|run/`, `internal/queue/queue.go` |
 
 Side effects on `projects` (same ownership split): upload tx → `deploying`;
 `MarkLive` tx → `running` + `current_deployment_id`; API compensation reverts

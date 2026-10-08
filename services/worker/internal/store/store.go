@@ -110,21 +110,19 @@ func (s *Store) ClaimBuild(ctx context.Context, deploymentID, workerID string) (
 }
 
 // MarkBuilt finalizes the build phase (status → built). The WHERE clause is
-// the CAS: it only matches if we still hold the claim. 0 rows = the claim was
-// stolen (our heartbeat went stale) and a different worker owns the job now —
-// report an error instead of writing over their state.
-func (s *Store) MarkBuilt(ctx context.Context, deploymentID, workerID string) error {
+// the CAS: it only matches if we still hold the claim. ok=false means the
+// claim was stolen (our heartbeat went stale) and a different worker owns the
+// job now — report that instead of writing over their state; the caller acks
+// and skips (the stealer is doing the work).
+func (s *Store) MarkBuilt(ctx context.Context, deploymentID, workerID string) (ok bool, err error) {
 	result, err := s.pool.Exec(ctx, `
 		UPDATE deployments SET status = 'built'
 		WHERE id = $1 AND status = 'building' AND worker_id = $2`,
 		deploymentID, workerID)
 	if err != nil {
-		return fmt.Errorf("mark built: %w", err)
+		return false, fmt.Errorf("mark built: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return fmt.Errorf("claim lost for deployment %s (status changed under us)", deploymentID)
-	}
-	return nil
+	return result.RowsAffected() == 1, nil
 }
 
 // NodeID returns the owning project's node id — the routing key for run.x
@@ -230,6 +228,67 @@ func (s *Store) ClaimRun(ctx context.Context, deploymentID, workerID string) (cl
 	return false, status, nil
 }
 
+// ReleaseClaim hands a claim back after a transient failure: status returns
+// to its pre-claim value, owner cleared, so the retried message can claim
+// afresh. Without this, a retry arriving 30 s later would bounce off our own
+// still-fresh heartbeat (claims steal only after 2 min) and be acked as
+// "not mine" — the job would wedge.
+//
+// CAS on worker_id: only the current owner releases, and only from an
+// in-progress state. releaseTo is caller-supplied ('queued' from the build
+// claim, 'built' from the run claim) and validated against typos.
+// ponytail: if this write itself fails (DB down), the retry path may still
+// wedge for up to 2 min until the heartbeat goes stale — the §14 sweeper is
+// the designed backstop for that residual window.
+func (s *Store) ReleaseClaim(ctx context.Context, deploymentID, workerID, releaseTo string) error {
+	if releaseTo != "queued" && releaseTo != "built" {
+		return fmt.Errorf("release claim: unexpected target state %q", releaseTo)
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE deployments SET status = $3, worker_id = NULL, heartbeat_at = NULL
+		WHERE id = $1 AND worker_id = $2 AND status IN ('building', 'starting')`,
+		deploymentID, workerID, releaseTo)
+	if err != nil {
+		return fmt.Errorf("release claim: %w", err)
+	}
+	// 0 rows = we never held it (or already released): nothing to undo.
+	return nil
+}
+
+// MarkFailed records the final failure (plan §6: permanent errors and
+// exhausted retries) in one transaction — same shape as the API's publish
+// compensation: the deployment fails with the cause, and the project only if
+// it is still 'deploying' (CAS, so a failed redeploy cannot flip a project
+// that a later deploy already moved to running).
+// The guard is "any open state": correct because only the owning worker calls
+// this while holding a fresh claim, and open states are exactly what a claim
+// can be in. Idempotent on 0 rows (already terminal).
+func (s *Store) MarkFailed(ctx context.Context, deploymentID, failure string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin mark failed: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	result, err := tx.Exec(ctx, `
+		UPDATE deployments SET status = 'failed', error = $2, finished_at = now()
+		WHERE id = $1 AND status IN ('queued', 'building', 'built', 'starting')`,
+		deploymentID, failure)
+	if err != nil {
+		return fmt.Errorf("mark failed: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return nil // already terminal (live/superseded/failed)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE projects SET status = 'failed'
+		WHERE id = (SELECT project_id FROM deployments WHERE id = $1) AND status = 'deploying'`,
+		deploymentID); err != nil {
+		return fmt.Errorf("fail project: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 // MarkLive finishes a deploy in ONE transaction (plan §8.2 step 6). The three
 // writes must be atomic because readers (API, console polling) would otherwise
 // catch a half-applied switch — e.g. the new deployment live while the project
@@ -239,12 +298,13 @@ func (s *Store) ClaimRun(ctx context.Context, deploymentID, workerID string) (cl
 //  2. previous live deployment → superseded   (at most one live per project)
 //  3. project → current_deployment_id + status/desired_state 'running'
 //
-// defer Rollback before Commit is the standard pgx/pgx pattern: Rollback on a
-// committed transaction is a no-op, so a single defer covers every error path.
-func (s *Store) MarkLive(ctx context.Context, deploymentID, projectID, workerID string) error {
+// ok=false means the claim was stolen under us — the deferred Rollback undoes
+// the empty work; the caller acks and skips (the stealer owns the job now).
+// Rollback after Commit is a no-op, so one defer covers every error path.
+func (s *Store) MarkLive(ctx context.Context, deploymentID, projectID, workerID string) (ok bool, err error) {
 	transaction, err := s.pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin mark live: %w", err)
+		return false, fmt.Errorf("begin mark live: %w", err)
 	}
 	defer transaction.Rollback(ctx)
 
@@ -253,24 +313,27 @@ func (s *Store) MarkLive(ctx context.Context, deploymentID, projectID, workerID 
 		WHERE id = $1 AND status = 'starting' AND worker_id = $2`,
 		deploymentID, workerID)
 	if err != nil {
-		return fmt.Errorf("mark live: %w", err)
+		return false, fmt.Errorf("mark live: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return fmt.Errorf("claim lost for deployment %s (status changed under us)", deploymentID)
+		return false, nil // claim lost — tx still empty, rolls back
 	}
 	if _, err := transaction.Exec(ctx, `
 		UPDATE deployments SET status = 'superseded'
 		WHERE project_id = $1 AND status = 'live' AND id <> $2`,
 		projectID, deploymentID); err != nil {
-		return fmt.Errorf("supersede previous live: %w", err)
+		return false, fmt.Errorf("supersede previous live: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `
 		UPDATE projects SET current_deployment_id = $1, status = 'running', desired_state = 'running'
 		WHERE id = $2`,
 		deploymentID, projectID); err != nil {
-		return fmt.Errorf("update project: %w", err)
+		return false, fmt.Errorf("update project: %w", err)
 	}
-	return transaction.Commit(ctx)
+	if err := transaction.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit mark live: %w", err)
+	}
+	return true, nil
 }
 
 // UpsertWorker refreshes this replica's row in workers (plan §8.7): it
