@@ -7,14 +7,15 @@ import {
   NotFoundException,
   PayloadTooLargeException,
 } from '@nestjs/common';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { mkdir, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fromFile } from 'file-type';
 import { DRIZZLE, Db } from '../db/db.module';
-import { deployments, publicDeploymentColumns, projects, sources } from '../db/schema';
+import { deployments, publicDeploymentColumns, publicSourceColumns, projects, sources } from '../db/schema';
+import { PageQueryDto } from '../common/page-query.dto';
 import { PublisherService } from '../queue/publisher.service';
 
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024; // plan §7: 50 MB
@@ -34,17 +35,23 @@ export class DeploymentsService {
     private readonly publisher: PublisherService,
   ) {}
 
+  /** 404 (not 403) when the project belongs to someone else or doesn't exist (AGENTS). */
+  private async assertOwned(projectId: string, userId: string) {
+    const [project] = await this.db
+      .select({ id: projects.id, status: projects.status })
+      .from(projects)
+      .where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
+      .limit(1);
+    if (!project) throw new NotFoundException('project not found');
+    return project;
+  }
+
   /** Multipart zip upload → source + queued deployment + build job (plan §7). */
   async uploadZip(projectId: string, userId: string, file?: Express.Multer.File) {
     const tmp = file?.path;
     if (!file || !tmp) throw new BadRequestException('zip file required (multipart field "file")');
     try {
-      const [project] = await this.db
-        .select({ id: projects.id, status: projects.status })
-        .from(projects)
-        .where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
-        .limit(1);
-      if (!project) throw new NotFoundException('project not found'); // 404, not 403 (AGENTS)
+      const project = await this.assertOwned(projectId, userId);
 
       const [active] = await this.db
         .select({ id: deployments.id })
@@ -106,5 +113,78 @@ export class DeploymentsService {
     } finally {
       await unlink(tmp).catch(() => {}); // no-op once renamed away
     }
+  }
+
+  async listDeployments(projectId: string, userId: string, query: PageQueryDto) {
+    await this.assertOwned(projectId, userId);
+    const limit = query.limit ?? 20;
+    const offset = query.offset ?? 0;
+    const [items, [{ count }]] = await Promise.all([
+      this.db
+        .select(publicDeploymentColumns)
+        .from(deployments)
+        .where(eq(deployments.projectId, projectId))
+        .orderBy(desc(deployments.createdAt))
+        .limit(limit)
+        .offset(offset),
+      this.db.select({ count: sql<number>`count(*)` }).from(deployments).where(eq(deployments.projectId, projectId)),
+    ]);
+    return { items, total: Number(count) };
+  }
+
+  async getDeployment(userId: string, id: string) {
+    const [row] = await this.db
+      .select(publicDeploymentColumns)
+      .from(deployments)
+      .innerJoin(projects, eq(deployments.projectId, projects.id))
+      .where(and(eq(deployments.id, id), eq(projects.userId, userId)))
+      .limit(1);
+    if (!row) throw new NotFoundException('deployment not found');
+    return row;
+  }
+
+  async listSources(projectId: string, userId: string, query: PageQueryDto) {
+    await this.assertOwned(projectId, userId);
+    const limit = query.limit ?? 20;
+    const offset = query.offset ?? 0;
+    const live = and(eq(sources.projectId, projectId), isNull(sources.deletedAt));
+    const [items, [{ count }]] = await Promise.all([
+      this.db
+        .select(publicSourceColumns)
+        .from(sources)
+        .where(live)
+        .orderBy(desc(sources.createdAt))
+        .limit(limit)
+        .offset(offset),
+      this.db.select({ count: sql<number>`count(*)` }).from(sources).where(live),
+    ]);
+    return { items, total: Number(count) };
+  }
+
+  /** Soft-delete a saved upload; refuses while a live/in-flight deployment needs the file. */
+  async deleteSource(projectId: string, userId: string, sourceId: string) {
+    await this.assertOwned(projectId, userId);
+    const [source] = await this.db
+      .select({ id: sources.id })
+      .from(sources)
+      .where(and(eq(sources.id, sourceId), eq(sources.projectId, projectId), isNull(sources.deletedAt)))
+      .limit(1);
+    if (!source) throw new NotFoundException('source not found');
+
+    // plan §7: never the source of the live deployment; also block in-flight
+    // ones (M3+ would unzip a file the platform is about to read)
+    const [inUse] = await this.db
+      .select({ id: deployments.id })
+      .from(deployments)
+      .where(
+        and(
+          eq(deployments.sourceId, sourceId),
+          inArray(deployments.status, [...ACTIVE_STATUSES, 'live']),
+        ),
+      )
+      .limit(1);
+    if (inUse) throw new ConflictException('source is in use by a live or in-flight deployment');
+
+    await this.db.update(sources).set({ deletedAt: new Date() }).where(eq(sources.id, sourceId));
   }
 }
