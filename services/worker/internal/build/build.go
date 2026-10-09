@@ -8,7 +8,8 @@
 //	                 queued → building → built            starting → live
 //
 // Steps done here: claim → load source + verify checksum → safe unzip
-// (unzip.go) → [M3.3: railpack build] → mark built + publish the run job.
+// (unzip.go) → railpack build with streamed logs (railpack.go) → mark built
+// + image_ref → publish the run job.
 //
 // Failure classification (plan §6 Consumer rules) — every delivery ends in
 // exactly one of:
@@ -130,7 +131,7 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 	}
 
 	// --- source: load and verify (plan §8.1 step 2) ------------------------
-	zipPath, checksum, found, err := handler.Store.SourceForDeployment(ctx, job.DeploymentID)
+	projectID, zipPath, checksum, found, err := handler.Store.SourceForDeployment(ctx, job.DeploymentID)
 	if err != nil {
 		return handler.transient(ctx, delivery, job.DeploymentID, "queued", logger, err)
 	}
@@ -164,10 +165,24 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 		return handler.transient(ctx, delivery, job.DeploymentID, "queued", logger, err)
 	}
 
-	// M3.3 inserts the railpack build (plan §8.1 step 4) right here:
-	// stream its output into deploy_logs, capture the image ref, treat a
-	// non-zero exit as a permanent failure (the student's code is broken).
-	built, err := handler.Store.MarkBuilt(ctx, job.DeploymentID, handler.WorkerID)
+	// --- build (plan §8.1 step 4) ------------------------------------------
+	tag := imageTag(projectID, job.DeploymentID)
+	if imageExists(tag) {
+		// Repair path: a previous attempt built the image but crashed before
+		// MarkBuilt — never rebuild what we already have (plan §8.1 step 4).
+		logger.Info("image already exists, skipping build", "image", tag)
+		if err := handler.Store.AppendLogs(ctx, job.DeploymentID, "system",
+			[]string{"image already built, skipping railpack: " + tag}); err != nil {
+			return handler.transient(ctx, delivery, job.DeploymentID, "queued", logger, err)
+		}
+	} else if err := runRailpack(ctx, handler.Store, logger, job.DeploymentID, root, tag); err != nil {
+		if isPermanent(err) {
+			return handler.permanent(ctx, job.DeploymentID, err.Error(), logger)
+		}
+		return handler.transient(ctx, delivery, job.DeploymentID, "queued", logger, err)
+	}
+
+	built, err := handler.Store.MarkBuilt(ctx, job.DeploymentID, handler.WorkerID, tag)
 	if err != nil {
 		// Claim held, status still 'building' — release so the retry can claim.
 		return handler.transient(ctx, delivery, job.DeploymentID, "queued", logger, err)

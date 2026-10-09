@@ -161,6 +161,10 @@ services:
       WORKER_ROLES: build,run
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       BUILDKIT_HOST: docker-container://buildkit
+      # Worker image ships Debian's old docker CLI (API 1.41) but the host
+      # daemon is Docker 29+ (min API 1.44) — force the newer API version so
+      # imageExists/buildkitPreflight can talk to it.
+      DOCKER_API_VERSION: ${DOCKER_API_VERSION:-1.44}
       AMQP_URL: amqp://${RABBITMQ_DEFAULT_USER:-zeroops}:${RABBITMQ_DEFAULT_PASSWORD}@rabbitmq:5672
       PLATFORM_DB_URL: postgres://${PLATFORM_DB_USER:-zeroops}:${PLATFORM_DB_PASSWORD}@platform-db:5432/${PLATFORM_DB_NAME:-zeroops}
       BUILD_PREFETCH: 1

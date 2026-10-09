@@ -109,16 +109,18 @@ func (s *Store) ClaimBuild(ctx context.Context, deploymentID, workerID string) (
 	return false, status, nil
 }
 
-// MarkBuilt finalizes the build phase (status → built). The WHERE clause is
-// the CAS: it only matches if we still hold the claim. ok=false means the
+// MarkBuilt finalizes the build phase (status → built) and records the image
+// reference the run role will start (plan §8.1 step 4: image_ref is written
+// only here, by the worker that built it — AGENTS invariant). The WHERE clause
+// is the CAS: it only matches if we still hold the claim. ok=false means the
 // claim was stolen (our heartbeat went stale) and a different worker owns the
 // job now — report that instead of writing over their state; the caller acks
 // and skips (the stealer is doing the work).
-func (s *Store) MarkBuilt(ctx context.Context, deploymentID, workerID string) (ok bool, err error) {
+func (s *Store) MarkBuilt(ctx context.Context, deploymentID, workerID, imageRef string) (ok bool, err error) {
 	result, err := s.pool.Exec(ctx, `
-		UPDATE deployments SET status = 'built'
+		UPDATE deployments SET status = 'built', image_ref = $3
 		WHERE id = $1 AND status = 'building' AND worker_id = $2`,
-		deploymentID, workerID)
+		deploymentID, workerID, imageRef)
 	if err != nil {
 		return false, fmt.Errorf("mark built: %w", err)
 	}
@@ -158,23 +160,23 @@ func (s *Store) LoadDeployment(ctx context.Context, deploymentID string) (projec
 	return projectID, true, nil
 }
 
-// SourceForDeployment returns the uploaded zip's storage path (relative to
-// UPLOADS_DIR) and its sha256 — plan §8.1 step 2. ok=false means the
-// deployment has no source row or the source was pruned by retention; the
-// build treats that as permanent (nothing to rebuild from).
-func (s *Store) SourceForDeployment(ctx context.Context, deploymentID string) (zipPath, checksum string, ok bool, err error) {
+// SourceForDeployment returns the owning project id plus the uploaded zip's
+// storage path (relative to UPLOADS_DIR) and sha256 — plan §8.1 step 2.
+// ok=false means the deployment has no source row or the source was pruned by
+// retention; the build treats that as permanent (nothing to rebuild from).
+func (s *Store) SourceForDeployment(ctx context.Context, deploymentID string) (projectID, zipPath, checksum string, ok bool, err error) {
 	err = s.pool.QueryRow(ctx, `
-		SELECT src.path, src.sha256
+		SELECT d.project_id, src.path, src.sha256
 		FROM deployments d
 		JOIN sources src ON src.id = d.source_id
-		WHERE d.id = $1 AND src.deleted_at IS NULL`, deploymentID).Scan(&zipPath, &checksum)
+		WHERE d.id = $1 AND src.deleted_at IS NULL`, deploymentID).Scan(&projectID, &zipPath, &checksum)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	if err != nil {
-		return "", "", false, fmt.Errorf("read source: %w", err)
+		return "", "", "", false, fmt.Errorf("read source: %w", err)
 	}
-	return zipPath, checksum, true, nil
+	return projectID, zipPath, checksum, true, nil
 }
 
 // AppendLogs inserts one batch of log lines for a deployment (plan §8.1 step
