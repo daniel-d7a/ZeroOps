@@ -1,28 +1,30 @@
 // Package run implements the run role (plan §8.2 deploy; §8.6 actions —
-// stop/start/restart — land with M4).
+// stop/start/restart — land with M4.2).
 //
 // Where the message came from: the build role finished a deployment and
 // published {"type":"deploy"} to run.x, routed to this node's queue
-// (run.<node>.q). This handler turns "built" into "live".
+// (run.<node>.q). This handler turns "built" into "live" for real:
 //
-// M2 fakes the work: lock → claim → mark live (+ supersede + project running).
-// M4 swaps in env loading, DB provisioning (§8.5), the replace-container
-// routine (§8.3) and Traefik routing (§8.4) — between the claim and MarkLive.
+//	lock → capacity → claim → network + container (§8.3) → health probe
+//	→ Traefik route (§8.4) → old containers removed → MarkLive (§8.2 step 6)
 //
 // Failure classification is the build role's (plan §6): malformed → dead,
-// transient → retry ×3 → failed + dead, permanent detectors arrive M4
-// (health check failed, node at capacity, image missing).
+// transient → retry ×3 → failed + dead; permanent here = node at capacity,
+// health check failed, image missing (§8.2/§8.6).
 package run
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
+	"zeroops/worker/internal/docker"
 	"zeroops/worker/internal/queue"
+	"zeroops/worker/internal/route"
 	"zeroops/worker/internal/store"
 )
 
@@ -33,6 +35,12 @@ type Handler struct {
 	Broker   *queue.Conn
 	WorkerID string
 	Logger   *slog.Logger
+
+	// Real-run plumbing (plan §8.2-8.4, M4):
+	Docker           *docker.Client
+	Router           *route.Writer
+	TraefikContainer string
+	MaxRunning       int
 }
 
 // jobMessage is the shared message envelope (plan §6): ids only.
@@ -60,7 +68,7 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 	logger := handler.Logger.With("deployment_id", job.DeploymentID)
 
 	// Messages carry ids only — reload everything from the DB (AGENTS).
-	projectID, found, err := handler.Store.LoadDeployment(ctx, job.DeploymentID)
+	projectID, slug, imageRef, found, err := handler.Store.LoadDeployment(ctx, job.DeploymentID)
 	if err != nil {
 		return handler.transient(ctx, delivery, job.DeploymentID, "", logger, err)
 	}
@@ -90,6 +98,16 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 		}
 	}()
 
+	// --- capacity (plan §8.2 step 1): permanent, before claiming -----------
+	// At the limit nothing this node does can help — a retry would hit the
+	// same wall (plan §6 "node at capacity" is permanent).
+	if running, err := handler.Docker.RunningStudentContainers(ctx); err != nil {
+		return handler.transient(ctx, delivery, job.DeploymentID, "", logger, err)
+	} else if running >= handler.MaxRunning {
+		return handler.permanent(ctx, job.DeploymentID, logger,
+			fmt.Sprintf("node at capacity: %d/%d student containers running", running, handler.MaxRunning))
+	}
+
 	// --- claim (atomic; stale-heartbeat steal built in) --------------------
 	claimed, currentStatus, err := handler.Store.ClaimRun(ctx, job.DeploymentID, handler.WorkerID)
 	if err != nil {
@@ -107,11 +125,77 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 	}
 	logger.Info("deploy claimed")
 
-	// --- the actual deploy (M2: fake) --------------------------------------
-	// M4 inserts here: env vars + PORT, DB provisioning (§8.5), replace
-	// container (§8.3), health probe, Traefik route (§8.4), image prune — all
-	// while the claim holds. Permanent failures detected there (health check
-	// failed, node at capacity, image missing) → MarkFailed + ack.
+	// --- the real deploy (plan §8.2 steps 3-5) -----------------------------
+	if imageRef == "" {
+		// A "built" deployment without an image is a broken row; no retry
+		// will conjure one (plan §6 permanent).
+		return handler.permanent(ctx, job.DeploymentID, logger, "deployment has no image — use Redeploy")
+	}
+	// Env: user variables arrive with M5 (decrypted) — for now the platform
+	// contract is just the port (plan §8.2 step 3).
+	env := []string{"PORT=3000"}
+	// DATABASE_URL joins here with M5 (plan §8.5), only when wants_db.
+
+	// --- replace-container routine (plan §8.3) -----------------------------
+	networkName, err := handler.Docker.EnsureProjectNetwork(ctx, projectID)
+	if err != nil {
+		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
+	}
+	// Traefik must live on the project network to reach the app by name
+	// through the file-provider route (§8.4). Idempotent.
+	if err := handler.Docker.ConnectContainer(ctx, networkName, handler.TraefikContainer); err != nil {
+		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
+	}
+
+	// app-<deploymentId> = 40 chars, inside the 63-char DNS label limit —
+	// Docker DNS refuses longer names ("no such host"), which broke the probe
+	// when the name was app-<projectId>-<deploymentId> (77 chars). Deployment
+	// ids are unique, so no project prefix is needed.
+	containerName := fmt.Sprintf("app-%s", job.DeploymentID)
+	spec := docker.StudentSpec{
+		Name:         containerName,
+		Image:        imageRef,
+		Network:      networkName,
+		Env:          env,
+		ProjectID:    projectID,
+		DeploymentID: job.DeploymentID,
+	}
+	if err := handler.Docker.RunStudent(ctx, spec); err != nil {
+		if errors.Is(err, docker.ErrImageMissing) {
+			return handler.permanent(ctx, job.DeploymentID, logger, err.Error())
+		}
+		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
+	}
+
+	// Probe from inside the project network (plan §8.3.3): join, dial, leave.
+	leave, err := handler.Docker.JoinForProbe(ctx, networkName, handler.WorkerID)
+	if err != nil {
+		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
+	}
+	probeErr := docker.ProbeTCP(ctx, containerName+":3000")
+	leave()
+	if probeErr != nil {
+		// Plan §8.3.4: remove ONLY the new container; the old container and
+		// its route are untouched — a failed deploy never takes the site down.
+		if rmErr := handler.Docker.RemoveContainer(ctx, containerName); rmErr != nil {
+			logger.Error("cleanup after failed probe did not apply", "error", rmErr)
+		}
+		return handler.permanent(ctx, job.DeploymentID, logger, "health check failed: "+probeErr.Error())
+	}
+
+	// Route moves only now (plan §8.4), then the old containers go (§8.3.5).
+	if err := handler.Router.Write(projectID, slug, containerName); err != nil {
+		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
+	}
+	if err := handler.Docker.RemoveProjectContainers(ctx, projectID, containerName); err != nil {
+		// The app is live and routed; a failed old-container cleanup must not
+		// fail the deploy — retry would be worse (it re-probes and re-routes).
+		logger.Error("old container cleanup failed", "error", err)
+	}
+
+	// --- finish (plan §8.2 step 6) ----------------------------------------
+	// TODO(M4.2): prune old images for this project — keep the live one and
+	// the one before it.
 	live, err := handler.Store.MarkLive(ctx, job.DeploymentID, projectID, handler.WorkerID)
 	if err != nil {
 		// Claim held, status still 'starting' (tx rolled back) — release it.
@@ -121,8 +205,19 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 		logger.Info("claim lost, another worker took the job")
 		return nil
 	}
-	logger.Info("deploy done: live")
+	logger.Info("deploy done: live", "slug", slug)
 	return nil
+}
+
+// permanent fails a deploy for good (plan §6): record the cause and ack —
+// no retry ladder, no dead message; the deployments row IS the record.
+// Mirrors the build role's helper (different package, same 8 lines).
+func (handler *Handler) permanent(ctx context.Context, deploymentID string, logger *slog.Logger, cause string) error {
+	if err := handler.Store.MarkFailed(ctx, deploymentID, cause); err != nil {
+		return err // DB unreachable: crash, the unacked message requeues
+	}
+	logger.Error("deploy failed permanently", "cause", cause)
+	return nil // main acks — finished, nothing to retry
 }
 
 // transient mirrors the build role (plan §6): release the claim if held,

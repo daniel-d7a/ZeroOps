@@ -305,7 +305,7 @@ Admin routes use a roles guard. Pagination on all list endpoints.
 
 
 1. Ensure the project network exists (create if missing, with the project label). Connect `traefik` to it (ignore "already connected"). Connect `student-db` too if the project has a database.
-2. Remove any leftover container with the new container's name. Create `app-<projectId>-<nonce>` (nonce is the deployment id or action id) from `image_ref`:
+2. Remove any leftover container with the new container's name. Create `app-<deploymentId>` (the id alone — `app-<projectId>-<deploymentId>` is 77 chars, over the 63-char DNS label limit, so Docker DNS refuses to resolve it) from `image_ref`:
    - Env: user vars plus `PORT=3000` and `DATABASE_URL` if present.
    - Limits: CPU 0.5 (`NanoCPUs: 500_000_000`), memory 1 GiB, `MemorySwap` equal to memory, `PidsLimit: 256`, `no-new-privileges`, not privileged, no Docker socket.
    - Restart policy `on-failure` with max 5 retries. Log driver `json-file` with `max-size=10m`, `max-file=3`.
@@ -319,7 +319,7 @@ Admin routes use a roles guard. Pagination on all list endpoints.
 ### 8.4 Routing with Traefik's file provider
 
 
-Traefik watches `/dynamic`. For each project the worker writes `/dynamic/proj-<projectId>.yml` with a router (`Host(\`<slug>.<BASE_DOMAIN>\`)`, entrypoint `web`) and a service pointing at `http://app-<projectId>-<nonce>:3000`. Write to a temp file and rename it so Traefik never reads a half-written file. The route moves only after the new container is healthy, which gives a clean switch and leaves the old version live when a deploy fails. Stopping a project deletes its file.
+Traefik watches `/dynamic`. For each project the worker writes `/dynamic/proj-<projectId>.yml` with a router (`Host(\`<slug>.<BASE_DOMAIN>\`)`, entrypoint `web`) and a service pointing at `http://app-<deploymentId>:3000`. Write to a temp file and rename it so Traefik never reads a half-written file. The route moves only after the new container is healthy, which gives a clean switch and leaves the old version live when a deploy fails. Stopping a project deletes its file.
 
 
 ### 8.5 Database provisioning (inside deploy, once per project)

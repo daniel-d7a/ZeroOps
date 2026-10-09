@@ -29,8 +29,10 @@ import (
 
 	"zeroops/worker/internal/build"
 	"zeroops/worker/internal/config"
+	"zeroops/worker/internal/docker"
 	"zeroops/worker/internal/log"
 	"zeroops/worker/internal/queue"
+	"zeroops/worker/internal/route"
 	"zeroops/worker/internal/run"
 	"zeroops/worker/internal/store"
 )
@@ -120,7 +122,21 @@ func main() {
 	}
 
 	if cfg.HasRole("run") {
-		runRole := &run.Handler{Store: datastore, Broker: broker, WorkerID: workerID, Logger: logger}
+		dockerClient, err := docker.New()
+		if err != nil {
+			logger.Error("docker unavailable", "error", err)
+			os.Exit(1)
+		}
+		runRole := &run.Handler{
+			Store:            datastore,
+			Broker:           broker,
+			WorkerID:         workerID,
+			Logger:           logger,
+			Docker:           dockerClient,
+			Router:           &route.Writer{Dir: cfg.DynamicConfigDir, Domain: cfg.BaseDomain},
+			TraefikContainer: cfg.TraefikContainer,
+			MaxRunning:       cfg.MaxRunningPerNode,
+		}
 		runQueueName := "run." + cfg.NodeID + ".q"
 		runDeliveries, err := broker.ConsumeRun(cfg.NodeID, cfg.RunPrefetch)
 		if err != nil {

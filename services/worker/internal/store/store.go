@@ -145,19 +145,23 @@ func (s *Store) NodeID(ctx context.Context, deploymentID string) (string, bool, 
 	return nodeID, true, nil
 }
 
-// LoadDeployment returns the project a deployment belongs to — the run role
-// needs the project id *before* it can take the per-project lock, and it must
-// reload it from the DB (messages carry ids only, AGENTS invariant).
-// found=false means the deployment row is gone.
-func (s *Store) LoadDeployment(ctx context.Context, deploymentID string) (projectID string, found bool, err error) {
-	err = s.pool.QueryRow(ctx, `SELECT project_id FROM deployments WHERE id = $1`, deploymentID).Scan(&projectID)
+// LoadDeployment returns everything the run role needs to place a deployment
+// (plan §8.2): the project id, the project's slug (builds the public URL,
+// plan §8.4) and the image reference the build role stored — image_ref is
+// read only from here (AGENTS invariant). found=false means the row is gone.
+func (s *Store) LoadDeployment(ctx context.Context, deploymentID string) (projectID, slug, imageRef string, found bool, err error) {
+	err = s.pool.QueryRow(ctx, `
+		SELECT d.project_id, p.slug, COALESCE(d.image_ref, '')
+		FROM deployments d
+		JOIN projects p ON p.id = d.project_id
+		WHERE d.id = $1`, deploymentID).Scan(&projectID, &slug, &imageRef)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
+		return "", "", "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("read deployment: %w", err)
+		return "", "", "", false, fmt.Errorf("read deployment: %w", err)
 	}
-	return projectID, true, nil
+	return projectID, slug, imageRef, true, nil
 }
 
 // SourceForDeployment returns the owning project id plus the uploaded zip's

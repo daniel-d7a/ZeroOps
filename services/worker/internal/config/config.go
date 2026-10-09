@@ -28,6 +28,11 @@ type Config struct {
 	RunPrefetch        int // unacked run jobs allowed at once (light → 4)
 	MinSchemaMigration int
 	ForceTransient     bool // test hook: every build job fails transiently (plan §11 gate)
+	// Run role (plan §8, M4):
+	BaseDomain        string // student URL host suffix: <slug>.<BaseDomain>
+	TraefikContainer  string // container to connect to project networks (routing)
+	DynamicConfigDir  string // Traefik file-provider directory the worker writes
+	MaxRunningPerNode int    // capacity guard: running student containers max
 }
 
 // Roles the worker understands. Anything else in WORKER_ROLES is a typo and
@@ -71,6 +76,17 @@ func Load() (Config, error) {
 	}
 	if workerConfig.RunPrefetch < 1 {
 		return Config{}, fmt.Errorf("RUN_PREFETCH must be >= 1")
+	}
+
+	// Run-role settings (plan §8 config list). Defaults match compose/traefik.
+	workerConfig.BaseDomain = envOr("BASE_DOMAIN", "localhost")
+	workerConfig.TraefikContainer = envOr("TRAEFIK_CONTAINER", "traefik")
+	workerConfig.DynamicConfigDir = envOr("DYNAMIC_CONFIG_DIR", "/dynamic")
+	if workerConfig.MaxRunningPerNode, err = envInt("MAX_RUNNING_PER_NODE", 50); err != nil {
+		return Config{}, err
+	}
+	if workerConfig.MaxRunningPerNode < 1 {
+		return Config{}, fmt.Errorf("MAX_RUNNING_PER_NODE must be >= 1")
 	}
 
 	// No defaults for connection strings — a default would point at the wrong
