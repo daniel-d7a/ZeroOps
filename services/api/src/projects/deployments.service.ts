@@ -51,19 +51,67 @@ export class DeploymentsService {
     return project;
   }
 
+  /** One deployment in flight per project (plan §7/§13): 409, never queued behind. */
+  private async assertNoActiveDeployment(projectId: string) {
+    const [active] = await this.db
+      .select({ id: deployments.id })
+      .from(deployments)
+      .where(and(eq(deployments.projectId, projectId), inArray(deployments.status, [...ACTIVE_STATUSES])))
+      .limit(1);
+    if (active) throw new ConflictException('a deployment is already queued or in progress');
+  }
+
+  /**
+   * Shared by upload and redeploy: insert the deployment row + flip the
+   * project to deploying (one unit), then publish the build. If the publish
+   * fails, compensate both sides — the commit above is durable, so undo it.
+   * kind distinguishes a fresh zip from a rebuild off a stored one (plan §13).
+   * beforeInsert runs inside the same transaction (upload inserts its source
+   * row there, so source + deployment + project stay one atomic unit).
+   */
+  private async queueDeployment(
+    project: { id: string; status: (typeof projects.status.enumValues)[number] },
+    userId: string,
+    sourceId: string,
+    kind: 'upload' | 'redeploy',
+    beforeInsert?: (tx: Db) => Promise<void>,
+  ) {
+    const deployment = await this.db.transaction(async (tx) => {
+      await beforeInsert?.(tx);
+      const [dep] = await tx
+        .insert(deployments)
+        .values({ projectId: project.id, sourceId, kind, triggeredBy: userId })
+        .returning(publicDeploymentColumns);
+      await tx.update(projects).set({ status: 'deploying' }).where(eq(projects.id, project.id));
+      return dep;
+    });
+
+    try {
+      await this.publisher.publishBuild(deployment.id);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await this.db.transaction(async (tx) => {
+        await tx
+          .update(deployments)
+          .set({ status: 'failed', error: `publish failed: ${message}`, finishedAt: new Date() })
+          .where(eq(deployments.id, deployment.id));
+        await tx
+          .update(projects)
+          .set({ status: project.status })
+          .where(and(eq(projects.id, project.id), eq(projects.status, 'deploying')));
+      });
+      throw new BadGatewayException('could not queue the build job');
+    }
+    return deployment;
+  }
+
   /** Multipart zip upload → source + queued deployment + build job (plan §7). */
   async uploadZip(projectId: string, userId: string, file?: Express.Multer.File) {
     const tmp = file?.path;
     if (!file || !tmp) throw new BadRequestException('zip file required (multipart field "file")');
     try {
       const project = await this.assertOwned(projectId, userId);
-
-      const [active] = await this.db
-        .select({ id: deployments.id })
-        .from(deployments)
-        .where(and(eq(deployments.projectId, projectId), inArray(deployments.status, [...ACTIVE_STATUSES])))
-        .limit(1);
-      if (active) throw new ConflictException('a deployment is already queued or in progress');
+      await this.assertNoActiveDeployment(projectId);
 
       if (file.size > MAX_UPLOAD_BYTES) throw new PayloadTooLargeException('zip exceeds 50 MB');
 
@@ -77,9 +125,7 @@ export class DeploymentsService {
       await mkdir(path.dirname(finalPath), { recursive: true });
       await rename(tmp, finalPath); // file first: a crash here leaves an unreferenced file, never a dangling row
 
-      // source + deployment + project status are one unit (a crash must not
-      // leave an orphan sources row or a queued deployment on a stale project)
-      const deployment = await this.db.transaction(async (tx) => {
+      const deployment = await this.queueDeployment(project, userId, sourceId, 'upload', async (tx) => {
         await tx.insert(sources).values({
           id: sourceId,
           projectId,
@@ -88,31 +134,7 @@ export class DeploymentsService {
           sha256,
           originalFilename: file.originalname.slice(0, 255),
         });
-        const [dep] = await tx
-          .insert(deployments)
-          .values({ projectId, sourceId, kind: 'upload', triggeredBy: userId })
-          .returning(publicDeploymentColumns);
-        await tx.update(projects).set({ status: 'deploying' }).where(eq(projects.id, projectId));
-        return dep;
       });
-
-      try {
-        await this.publisher.publishBuild(deployment.id);
-      } catch (err) {
-        // compensating write: the commit above is durable, so undo both sides
-        const message = err instanceof Error ? err.message : String(err);
-        await this.db.transaction(async (tx) => {
-          await tx
-            .update(deployments)
-            .set({ status: 'failed', error: `publish failed: ${message}`, finishedAt: new Date() })
-            .where(eq(deployments.id, deployment.id));
-          await tx
-            .update(projects)
-            .set({ status: project.status })
-            .where(and(eq(projects.id, projectId), eq(projects.status, 'deploying')));
-        });
-        throw new BadGatewayException('could not queue the build job');
-      }
 
       // Retention runs inline on every successful upload (plan §7) — never
       // fails the request: the deploy already happened, a prune problem is a
@@ -125,6 +147,33 @@ export class DeploymentsService {
     } finally {
       await unlink(tmp).catch(() => {}); // no-op once renamed away
     }
+  }
+
+  /**
+   * Redeploy from a stored zip (plan §13): default the newest non-pruned
+   * source; explicit sourceId must exist, belong to this project, and not be
+   * pruned — 404 otherwise (the file is already unlinked at prune time, so a
+   * rebuild would fail mid-build with a confusing error; refuse up front).
+   */
+  async redeploy(projectId: string, userId: string, sourceId?: string) {
+    const project = await this.assertOwned(projectId, userId);
+    await this.assertNoActiveDeployment(projectId);
+
+    const [source] = sourceId
+      ? await this.db
+          .select({ id: sources.id })
+          .from(sources)
+          .where(and(eq(sources.id, sourceId), eq(sources.projectId, projectId), isNull(sources.deletedAt)))
+          .limit(1)
+      : await this.db
+          .select({ id: sources.id })
+          .from(sources)
+          .where(and(eq(sources.projectId, projectId), isNull(sources.deletedAt)))
+          .orderBy(desc(sources.createdAt), desc(sources.id))
+          .limit(1);
+    if (!source) throw new NotFoundException('source not found (pruned or never uploaded)');
+
+    return this.queueDeployment(project, userId, source.id, 'redeploy');
   }
 
   /**

@@ -10,6 +10,7 @@ import { PageQueryDto } from '../common/page-query.dto';
 import { SessionGuard } from '../auth/session.guard';
 import { ActionsService } from './actions.service';
 import { CreateProjectDto } from './dto/create-project.dto';
+import { RedeployDto } from './dto/redeploy.dto';
 import { DeploymentsService, MAX_UPLOAD_BYTES } from './deployments.service';
 import { ProjectsService } from './projects.service';
 
@@ -50,6 +51,12 @@ export class ProjectsController {
     @UploadedFile() file?: Express.Multer.File,
   ) {
     return this.deployments.uploadZip(id, req.session.uid!, file);
+  }
+
+  @Post(':id/redeploy')
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
+  redeploy(@Param('id', ParseUUIDPipe) id: string, @Req() req: Request, @Body() dto: RedeployDto) {
+    return this.deployments.redeploy(id, req.session.uid!, dto.sourceId);
   }
 
   @Get()
