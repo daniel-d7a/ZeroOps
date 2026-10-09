@@ -8,9 +8,10 @@ Spec: `plan.md`. Agent operating manual: `AGENTS.md`.
 
 ## Status
 
-Milestone **M2 (sources, upload, queue plumbing)** done — uploads run the full
-`queued → building → built → starting → live` pipeline with retries, a dead
-queue, and shared workers. Next: **M3 (real builds)**. See `AGENTS.md`.
+Milestone **M3 (real build)** done — uploaded zips are safely extracted,
+verified, and built with Railpack; build logs stream to the API and
+`broken-build` failures stay visible and permanent. Next: **M4 (real run)**.
+See `AGENTS.md`.
 
 ## Requirements
 
