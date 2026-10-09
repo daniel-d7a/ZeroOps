@@ -8,6 +8,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { PageQueryDto } from '../common/page-query.dto';
 import { SessionGuard } from '../auth/session.guard';
+import { ActionsService } from './actions.service';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { DeploymentsService, MAX_UPLOAD_BYTES } from './deployments.service';
 import { ProjectsService } from './projects.service';
@@ -28,6 +29,7 @@ export class ProjectsController {
   constructor(
     private readonly projects: ProjectsService,
     private readonly deployments: DeploymentsService,
+    private readonly actions: ActionsService,
   ) {}
 
   @Post()
@@ -67,6 +69,33 @@ export class ProjectsController {
   @Get(':id/sources')
   listSources(@Param('id', ParseUUIDPipe) id: string, @Query() query: PageQueryDto, @Req() req: Request) {
     return this.deployments.listSources(id, req.session.uid!, query);
+  }
+
+  @Get(':id/actions')
+  listActions(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: PageQueryDto,
+    @Req() req: Request,
+  ) {
+    return this.actions.list(id, req.session.uid!, query);
+  }
+
+  @Post(':id/stop')
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
+  stop(@Param('id', ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.actions.request(id, req.session.uid!, 'stop');
+  }
+
+  @Post(':id/start')
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
+  start(@Param('id', ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.actions.request(id, req.session.uid!, 'start');
+  }
+
+  @Post(':id/restart')
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
+  restart(@Param('id', ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.actions.request(id, req.session.uid!, 'restart');
   }
 
   @Get(':id')

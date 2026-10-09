@@ -32,6 +32,11 @@ export class PublisherService implements OnApplicationBootstrap, OnApplicationSh
     await this.publish('build.x', 'build', { type: 'build', deployment_id: deploymentId });
   }
 
+  /** Action job (plan §8.6): routed exactly like a deploy — run.x keyed by the project's node. */
+  async publishAction(actionId: string, nodeId: string): Promise<void> {
+    await this.publish('run.x', nodeId, { type: 'action', action_id: actionId });
+  }
+
   private async publish(exchange: string, routingKey: string, body: unknown): Promise<void> {
     const channel = this.channel;
     if (!channel) throw new Error('publisher not connected');
