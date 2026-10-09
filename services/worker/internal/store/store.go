@@ -378,6 +378,110 @@ func (s *Store) MarkLive(ctx context.Context, deploymentID, projectID, workerID 
 	return true, nil
 }
 
+// --- project actions (plan §8.6: stop / start / restart) ---------------------
+
+// ActionInfo is everything the run handler needs to execute one action: the
+// message carries only the action id, so the slug and the current
+// deployment's image ride along here — start/restart can rewrite the route
+// and rebuild a missing container without further queries.
+type ActionInfo struct {
+	ID           string
+	ProjectID    string
+	Type         string // stop | start | restart
+	Status       string // queued | running | done | failed
+	Slug         string
+	DeploymentID string // projects.current_deployment_id ("" if never deployed)
+	ImageRef     string // its image ("" if none)
+}
+
+// LoadAction loads the action plus its project context. found=false: the row
+// is gone (deleted project), nothing to do.
+func (s *Store) LoadAction(ctx context.Context, actionID string) (ActionInfo, bool, error) {
+	var info ActionInfo
+	err := s.pool.QueryRow(ctx, `
+		SELECT a.id, a.project_id, a.type, a.status, p.slug,
+		       COALESCE(p.current_deployment_id::text, ''),
+		       COALESCE(d.image_ref, '')
+		FROM project_actions a
+		JOIN projects p ON p.id = a.project_id
+		LEFT JOIN deployments d ON d.id = p.current_deployment_id
+		WHERE a.id = $1`, actionID).Scan(
+		&info.ID, &info.ProjectID, &info.Type, &info.Status, &info.Slug, &info.DeploymentID, &info.ImageRef)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ActionInfo{}, false, nil
+	}
+	if err != nil {
+		return ActionInfo{}, false, fmt.Errorf("load action: %w", err)
+	}
+	return info, true, nil
+}
+
+// ClaimAction moves queued → running. Unlike deployments, actions have no
+// worker/heartbeat columns (plan §8.6): they are short-lived, so a claim
+// lost to a duplicate delivery is simply skipped — the owner finishes it.
+func (s *Store) ClaimAction(ctx context.Context, actionID string) (claimed bool, status string, err error) {
+	result, err := s.pool.Exec(ctx, `
+		UPDATE project_actions SET status = 'running'
+		WHERE id = $1 AND status = 'queued'`, actionID)
+	if err != nil {
+		return false, "", fmt.Errorf("claim action: %w", err)
+	}
+	if result.RowsAffected() == 1 {
+		return true, "", nil
+	}
+	if err := s.pool.QueryRow(ctx, `SELECT status FROM project_actions WHERE id = $1`, actionID).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, "", nil
+		}
+		return false, "", fmt.Errorf("read action status: %w", err)
+	}
+	return false, status, nil
+}
+
+// ReleaseAction hands a claim back after a transient failure (running →
+// queued) so the retried message can re-claim — same wedge-prevention idea
+// as ReleaseClaim, without the worker column.
+func (s *Store) ReleaseAction(ctx context.Context, actionID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE project_actions SET status = 'queued'
+		WHERE id = $1 AND status = 'running'`, actionID)
+	if err != nil {
+		return fmt.Errorf("release action: %w", err)
+	}
+	return nil
+}
+
+// FinishAction records the outcome (plan §8.6 last step). CAS on "open"
+// states: the write only applies while nobody else has terminalized the row,
+// and is a no-op when it is already done/failed. queued is included so that
+// a give-up before any claim (DB was down for the whole ladder) can still
+// fail the row instead of leaving it queued forever.
+func (s *Store) FinishAction(ctx context.Context, actionID, status, failure string) error {
+	if status != "done" && status != "failed" {
+		return fmt.Errorf("finish action: unexpected status %q", status)
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE project_actions SET status = $2, error = NULLIF($3, ''), finished_at = now()
+		WHERE id = $1 AND status IN ('queued', 'running')`, actionID, status, failure)
+	if err != nil {
+		return fmt.Errorf("finish action: %w", err)
+	}
+	return nil
+}
+
+// SetProjectState applies the plan §8.6 bookkeeping after a successful
+// stop/start/restart: desired_state is what the user asked for, status is
+// what the project is now.
+func (s *Store) SetProjectState(ctx context.Context, projectID, desired, status string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE projects SET desired_state = $2, status = $3 WHERE id = $1`,
+		projectID, desired, status)
+	if err != nil {
+		return fmt.Errorf("set project state: %w", err)
+	}
+	return nil
+}
+
 // UpsertWorker refreshes this replica's row in workers (plan §8.7): it
 // appears on first tick, then last_seen_at moves every 15 seconds.
 // processStartedAt is the process start time in unix seconds — the same value

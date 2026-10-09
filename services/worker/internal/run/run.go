@@ -1,12 +1,12 @@
-// Package run implements the run role (plan §8.2 deploy; §8.6 actions —
-// stop/start/restart — land with M4.2).
+// Package run implements the run role (plan §8.2 deploy, §8.6 actions).
 //
-// Where the message came from: the build role finished a deployment and
-// published {"type":"deploy"} to run.x, routed to this node's queue
-// (run.<node>.q). This handler turns "built" into "live" for real:
+// Two message types share this queue (run.<node>.q), dispatched on `type`:
 //
-//	lock → capacity → claim → network + container (§8.3) → health probe
-//	→ Traefik route (§8.4) → old containers removed → MarkLive (§8.2 step 6)
+//	{"type":"deploy","deployment_id":...}  — published by the build role:
+//	lock → capacity → claim → replace-container (§8.3) → probe → route (§8.4)
+//	→ switch → MarkLive (§8.2)
+//	{"type":"action","action_id":...}      — published by the API (stop /
+//	start / restart): lock → claim → the §8.6 routine → action row done/failed
 //
 // Failure classification is the build role's (plan §6): malformed → dead,
 // transient → retry ×3 → failed + dead; permanent here = node at capacity,
@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
@@ -27,6 +28,9 @@ import (
 	"zeroops/worker/internal/route"
 	"zeroops/worker/internal/store"
 )
+
+// stopGrace is the plan §8.6 shutdown window: SIGTERM, then SIGKILL.
+const stopGrace = 10 * time.Second
 
 // Handler processes run jobs. Stateless like the build handler — replicas
 // share one queue and the DB holds all state.
@@ -47,24 +51,42 @@ type Handler struct {
 type jobMessage struct {
 	Type         string `json:"type"`
 	DeploymentID string `json:"deployment_id"`
+	ActionID     string `json:"action_id"`
 }
 
-// Handle processes exactly one run delivery. Step order follows plan §8.2:
-//
-//  1. resolve project → 2. lock project → 3. claim built→starting
-//     → 4. do the deploy (M2: fake) → 5. mark live (+ supersede + project) → ack
-//
-// Return contract: nil → main acks (finished / skipped / retried /
-// dead-lettered — DB writes happen before the ack); non-nil → crash, message
-// requeues.
+// permanentError marks a failure no retry can fix (plan §6): the shared
+// replace-container routine returns it, the caller records it on the row and
+// acks — so deploy, start and restart classify the same failures identically.
+type permanentError struct{ msg string }
+
+func (e permanentError) Error() string { return e.msg }
+
+// containerName is app-<deploymentId> — 40 chars, inside the 63-char DNS
+// label limit (a longer name broke Docker DNS: "no such host").
+func containerName(deploymentID string) string {
+	return "app-" + deploymentID
+}
+
+// Handle dispatches one run delivery on its type. Return contract: nil → main
+// acks (finished / skipped / retried / dead-lettered — DB writes happen before
+// the ack); non-nil → crash, message requeues.
 func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) error {
 	var job jobMessage
 	if err := json.Unmarshal(delivery.Body, &job); err != nil {
 		return handler.dead(ctx, delivery, "malformed: "+err.Error())
 	}
-	if job.Type != "deploy" || job.DeploymentID == "" {
+	switch {
+	case job.Type == "deploy" && job.DeploymentID != "":
+		return handler.handleDeploy(ctx, delivery, job)
+	case job.Type == "action" && job.ActionID != "":
+		return handler.handleAction(ctx, delivery, job)
+	default:
 		return handler.dead(ctx, delivery, fmt.Sprintf("unexpected message type %q", job.Type))
 	}
+}
+
+// handleDeploy: plan §8.2 — turn a built deployment into a live one.
+func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Delivery, job jobMessage) error {
 	logger := handler.Logger.With("deployment_id", job.DeploymentID)
 
 	// Messages carry ids only — reload everything from the DB (AGENTS).
@@ -131,70 +153,16 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 		// will conjure one (plan §6 permanent).
 		return handler.permanent(ctx, job.DeploymentID, logger, "deployment has no image — use Redeploy")
 	}
-	// Env: user variables arrive with M5 (decrypted) — for now the platform
-	// contract is just the port (plan §8.2 step 3).
-	env := []string{"PORT=3000"}
-	// DATABASE_URL joins here with M5 (plan §8.5), only when wants_db.
-
-	// --- replace-container routine (plan §8.3) -----------------------------
-	networkName, err := handler.Docker.EnsureProjectNetwork(ctx, projectID)
-	if err != nil {
-		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
-	}
-	// Traefik must live on the project network to reach the app by name
-	// through the file-provider route (§8.4). Idempotent.
-	if err := handler.Docker.ConnectContainer(ctx, networkName, handler.TraefikContainer); err != nil {
-		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
-	}
-
-	// app-<deploymentId> = 40 chars, inside the 63-char DNS label limit —
-	// Docker DNS refuses longer names ("no such host"), which broke the probe
-	// when the name was app-<projectId>-<deploymentId> (77 chars). Deployment
-	// ids are unique, so no project prefix is needed.
-	containerName := fmt.Sprintf("app-%s", job.DeploymentID)
-	spec := docker.StudentSpec{
-		Name:         containerName,
-		Image:        imageRef,
-		Network:      networkName,
-		Env:          env,
-		ProjectID:    projectID,
-		DeploymentID: job.DeploymentID,
-	}
-	if err := handler.Docker.RunStudent(ctx, spec); err != nil {
-		if errors.Is(err, docker.ErrImageMissing) {
-			return handler.permanent(ctx, job.DeploymentID, logger, err.Error())
+	if err := handler.replaceContainer(ctx, projectID, job.DeploymentID, slug, imageRef, logger); err != nil {
+		var perm permanentError
+		if errors.As(err, &perm) {
+			return handler.permanent(ctx, job.DeploymentID, logger, perm.Error())
 		}
 		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
-	}
-
-	// Probe from inside the project network (plan §8.3.3): join, dial, leave.
-	leave, err := handler.Docker.JoinForProbe(ctx, networkName, handler.WorkerID)
-	if err != nil {
-		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
-	}
-	probeErr := docker.ProbeTCP(ctx, containerName+":3000")
-	leave()
-	if probeErr != nil {
-		// Plan §8.3.4: remove ONLY the new container; the old container and
-		// its route are untouched — a failed deploy never takes the site down.
-		if rmErr := handler.Docker.RemoveContainer(ctx, containerName); rmErr != nil {
-			logger.Error("cleanup after failed probe did not apply", "error", rmErr)
-		}
-		return handler.permanent(ctx, job.DeploymentID, logger, "health check failed: "+probeErr.Error())
-	}
-
-	// Route moves only now (plan §8.4), then the old containers go (§8.3.5).
-	if err := handler.Router.Write(projectID, slug, containerName); err != nil {
-		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
-	}
-	if err := handler.Docker.RemoveProjectContainers(ctx, projectID, containerName); err != nil {
-		// The app is live and routed; a failed old-container cleanup must not
-		// fail the deploy — retry would be worse (it re-probes and re-routes).
-		logger.Error("old container cleanup failed", "error", err)
 	}
 
 	// --- finish (plan §8.2 step 6) ----------------------------------------
-	// TODO(M4.2): prune old images for this project — keep the live one and
+	// TODO(M4.5): prune old images for this project — keep the live one and
 	// the one before it.
 	live, err := handler.Store.MarkLive(ctx, job.DeploymentID, projectID, handler.WorkerID)
 	if err != nil {
@@ -250,5 +218,257 @@ func (handler *Handler) dead(ctx context.Context, delivery amqp091.Delivery, rea
 		return err
 	}
 	handler.Logger.Warn("message dead-lettered", "reason", reason)
+	return nil
+}
+
+// --- replace-container (plan §8.3) -----------------------------------------
+
+// replaceContainer is the §8.3 step 4-5 sequence, shared by deploy, start
+// (container gone) and restart: ensure the project network, join Traefik,
+// run a fresh container from imageRef, probe it, write the route, remove the
+// old containers. Returns permanentError for health-check/image failures
+// (plan §6 permanent) so every caller classifies the same failure the same
+// way — no point retrying a container that immediately dies or an image that
+// does not exist.
+func (handler *Handler) replaceContainer(ctx context.Context, projectID, deploymentID, slug, imageRef string, logger *slog.Logger) error {
+	networkName, err := handler.Docker.EnsureProjectNetwork(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	// Traefik must live on the project network to reach the app by name
+	// through the file-provider route (§8.4). Idempotent.
+	if err := handler.Docker.ConnectContainer(ctx, networkName, handler.TraefikContainer); err != nil {
+		return err
+	}
+
+	name := containerName(deploymentID)
+	// Env: user variables arrive with M5 (decrypted) — for now the platform
+	// contract is just the port (plan §8.2 step 3). DATABASE_URL joins with
+	// M5 (plan §8.5), only when wants_db.
+	spec := docker.StudentSpec{
+		Name:         name,
+		Image:        imageRef,
+		Network:      networkName,
+		Env:          []string{"PORT=3000"},
+		ProjectID:    projectID,
+		DeploymentID: deploymentID,
+	}
+	if err := handler.Docker.RunStudent(ctx, spec); err != nil {
+		if errors.Is(err, docker.ErrImageMissing) {
+			return permanentError{"image missing, use Redeploy: " + err.Error()}
+		}
+		return err
+	}
+
+	if probeErr := handler.probe(ctx, networkName, name); probeErr != nil {
+		// Plan §8.3.4: remove ONLY the new container; the old container and
+		// its route are untouched — a failed deploy never takes the site down.
+		if rmErr := handler.Docker.RemoveContainer(ctx, name); rmErr != nil {
+			logger.Error("cleanup after failed probe did not apply", "error", rmErr)
+		}
+		return permanentError{"health check failed: " + probeErr.Error()}
+	}
+
+	// Route moves only now (plan §8.4), then the old containers go (§8.3.5).
+	if err := handler.Router.Write(projectID, slug, name); err != nil {
+		return err
+	}
+	if err := handler.Docker.RemoveProjectContainers(ctx, projectID, name); err != nil {
+		// The app is live and routed; a failed old-container cleanup must not
+		// fail the deploy — retry would be worse (it re-probes and re-routes).
+		logger.Error("old container cleanup failed", "error", err)
+	}
+	return nil
+}
+
+// probe joins the project network, dials the app, and leaves — plan §8.3.3:
+// the worker is not on the student network, so it dials from inside.
+func (handler *Handler) probe(ctx context.Context, networkName, container string) error {
+	leave, err := handler.Docker.JoinForProbe(ctx, networkName, handler.WorkerID)
+	if err != nil {
+		return err
+	}
+	probeErr := docker.ProbeTCP(ctx, container+":3000")
+	leave()
+	return probeErr
+}
+
+// --- actions (plan §8.6) ---------------------------------------------------
+
+// handleAction executes one stop/start/restart (plan §8.6): load → skip if
+// not queued → lock → claim → run → finish done/failed. Transient failures
+// release the claim and go through the retry ladder; exhausting the ladder
+// fails the action row so it does not stay queued forever.
+func (handler *Handler) handleAction(ctx context.Context, delivery amqp091.Delivery, job jobMessage) error {
+	logger := handler.Logger.With("action_id", job.ActionID)
+
+	action, found, err := handler.Store.LoadAction(ctx, job.ActionID)
+	if err != nil {
+		// Pre-claim: nothing to release, but the ladder must still run — and
+		// give-up fails the row (FinishAction accepts queued, so it does not
+		// stay queued forever; a 0-row no-op if the row is really gone).
+		return handler.actionTransient(ctx, delivery, job.ActionID, logger, err)
+	}
+	if !found {
+		logger.Warn("action not found, skipping")
+		return nil
+	}
+	logger = logger.With("project_id", action.ProjectID, "action_type", action.Type)
+
+	// Already terminal (or a sibling holds the claim): nothing to do — the
+	// plan's "done or failed → ack and skip" (running too, since actions have
+	// no heartbeat steal to fall back on).
+	if action.Status != "queued" {
+		logger.Info("action skipped", "status", action.Status)
+		return nil
+	}
+
+	unlock, lockAcquired, err := handler.Store.TryProjectLock(ctx, action.ProjectID)
+	if err != nil {
+		return handler.actionTransient(ctx, delivery, action.ID, logger, err)
+	}
+	if !lockAcquired {
+		return handler.actionTransient(ctx, delivery, action.ID, logger,
+			fmt.Errorf("project lock busy"))
+	}
+	defer func() {
+		if unlockErr := unlock(); unlockErr != nil {
+			logger.Error("advisory unlock failed", "error", unlockErr)
+		}
+	}()
+
+	claimed, status, err := handler.Store.ClaimAction(ctx, action.ID)
+	if err != nil {
+		if releaseErr := handler.Store.ReleaseAction(ctx, action.ID); releaseErr != nil {
+			logger.Error("release after failed claim did not apply", "error", releaseErr)
+		}
+		return handler.actionTransient(ctx, delivery, action.ID, logger, err)
+	}
+	if !claimed {
+		logger.Info("action skipped", "status", status)
+		return nil
+	}
+	logger.Info("action claimed")
+
+	permanentMsg, err := handler.runAction(ctx, action)
+	if err != nil {
+		// Transient: hand the claim back so the retried message can re-claim,
+		// then the ladder (30 s TTL doubles as the backoff).
+		if releaseErr := handler.Store.ReleaseAction(ctx, action.ID); releaseErr != nil {
+			return releaseErr
+		}
+		return handler.actionTransient(ctx, delivery, action.ID, logger, err)
+	}
+	if permanentMsg != "" {
+		if err := handler.Store.FinishAction(ctx, action.ID, "failed", permanentMsg); err != nil {
+			return err
+		}
+		logger.Error("action failed permanently", "cause", permanentMsg)
+		return nil
+	}
+	if err := handler.Store.FinishAction(ctx, action.ID, "done", ""); err != nil {
+		return err
+	}
+	logger.Info("action done")
+	return nil
+}
+
+// runAction is the plan §8.6 execution itself. Returns (permanentMsg, err):
+// a non-empty permanentMsg is a clean failure the row should record; a
+// non-nil err is transient (release + retry). The project lock is held here.
+func (handler *Handler) runAction(ctx context.Context, action store.ActionInfo) (permanentMsg string, err error) {
+	switch action.Type {
+	case "stop":
+		// Route first: the URL must die before (or at worst together with) the
+		// container — never after.
+		if err := handler.Router.Delete(action.ProjectID); err != nil {
+			return "", err
+		}
+		if err := handler.Docker.StopProjectContainers(ctx, action.ProjectID, stopGrace); err != nil {
+			return "", err
+		}
+		if err := handler.Store.SetProjectState(ctx, action.ProjectID, "stopped", "stopped"); err != nil {
+			return "", err
+		}
+		return "", nil
+
+	case "start":
+		if action.DeploymentID == "" || action.ImageRef == "" {
+			return "nothing to start: no deployment yet — upload first", nil
+		}
+		name := containerName(action.DeploymentID)
+		started, err := handler.Docker.StartContainer(ctx, name)
+		if err != nil {
+			return "", err
+		}
+		if started {
+			// Reuse the stopped container: network + traefik (idempotent),
+			// probe, route back on. No rebuild.
+			networkName, err := handler.Docker.EnsureProjectNetwork(ctx, action.ProjectID)
+			if err != nil {
+				return "", err
+			}
+			if err := handler.Docker.ConnectContainer(ctx, networkName, handler.TraefikContainer); err != nil {
+				return "", err
+			}
+			if err := handler.probe(ctx, networkName, name); err != nil {
+				return "health check failed: " + err.Error(), nil
+			}
+			if err := handler.Router.Write(action.ProjectID, action.Slug, name); err != nil {
+				return "", err
+			}
+		} else {
+			// Container gone (pruned, crashed past recovery): rebuild from the
+			// current image (plan §8.3 again).
+			if err := handler.replaceContainer(ctx, action.ProjectID, action.DeploymentID, action.Slug, action.ImageRef, handler.Logger); err != nil {
+				var perm permanentError
+				if errors.As(err, &perm) {
+					return perm.Error(), nil
+				}
+				return "", err
+			}
+		}
+		if err := handler.Store.SetProjectState(ctx, action.ProjectID, "running", "running"); err != nil {
+			return "", err
+		}
+		return "", nil
+
+	case "restart":
+		if action.DeploymentID == "" || action.ImageRef == "" {
+			return "nothing to restart: no deployment yet — upload first", nil
+		}
+		if err := handler.replaceContainer(ctx, action.ProjectID, action.DeploymentID, action.Slug, action.ImageRef, handler.Logger); err != nil {
+			var perm permanentError
+			if errors.As(err, &perm) {
+				return perm.Error(), nil
+			}
+			return "", err
+		}
+		if err := handler.Store.SetProjectState(ctx, action.ProjectID, "running", "running"); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	return fmt.Sprintf("unknown action type %q", action.Type), nil
+}
+
+// actionTransient is the run side of plan §6 for actions: the ladder is the
+// same retry exchange as deploy; giving up records the failure on the action
+// row (FinishAction accepts queued, so even a pre-claim give-up lands).
+func (handler *Handler) actionTransient(ctx context.Context, delivery amqp091.Delivery, actionID string, logger *slog.Logger, cause error) error {
+	gaveUp, err := handler.Broker.RetryOrGiveUp(ctx, "run", delivery, cause.Error())
+	if err != nil {
+		return err
+	}
+	if gaveUp {
+		if actionID != "" {
+			if finErr := handler.Store.FinishAction(ctx, actionID, "failed", "action failed after retries: "+cause.Error()); finErr != nil {
+				return finErr
+			}
+		}
+		logger.Error("gave up after retries, dead-lettered", "cause", cause)
+		return nil
+	}
+	logger.Warn("transient error, retry scheduled", "cause", cause, "attempt", queue.ReadAttempt(delivery)+1)
 	return nil
 }

@@ -198,6 +198,47 @@ func ProbeTCP(ctx context.Context, addr string) error {
 	}
 }
 
+// StopProjectContainers stops every running container of the project with a
+// grace period, KEEPING them for a later start (plan §8.6 stop — reversible
+// without a rebuild). Docker's on-failure restart policy never resurrects a
+// manually stopped container, which is exactly the "not undone by the restart
+// policy" clause in the plan; nothing extra is needed for that.
+func (c *Client) StopProjectContainers(ctx context.Context, projectID string, grace time.Duration) error {
+	containers, err := c.listProject(ctx, true, projectID)
+	if err != nil {
+		return err
+	}
+	seconds := int(grace.Seconds())
+	for _, ctr := range containers {
+		if ctr.State != "running" {
+			continue
+		}
+		if err := c.cli.ContainerStop(ctx, ctr.ID, container.StopOptions{Timeout: &seconds}); err != nil &&
+			!errdefs.IsNotFound(err) {
+			return fmt.Errorf("stop %s: %w", ctr.Names[0], err)
+		}
+	}
+	return nil
+}
+
+// StartContainer starts a previously stopped container (plan §8.6 start:
+// reuse it when it still exists — no rebuild). ok=false means there is
+// nothing to start; the caller then rebuilds from image_ref. Starting an
+// already-running container is a Docker "not modified" — success here.
+func (c *Client) StartContainer(ctx context.Context, name string) (ok bool, err error) {
+	if _, err := c.cli.ContainerInspect(ctx, name); err != nil {
+		if errdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect %s: %w", name, err)
+	}
+	if err := c.cli.ContainerStart(ctx, name, container.StartOptions{}); err != nil &&
+		!errdefs.IsNotModified(err) {
+		return false, fmt.Errorf("start %s: %w", name, err)
+	}
+	return true, nil
+}
+
 // RemoveContainer force-removes one container by name (plan §8.3 step 4:
 // the failed new container goes, the old one stays). Missing = success.
 func (c *Client) RemoveContainer(ctx context.Context, name string) error {
