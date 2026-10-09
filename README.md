@@ -8,10 +8,11 @@ Spec: `plan.md`. Agent operating manual: `AGENTS.md`.
 
 ## Status
 
-Milestone **M3 (real build)** done — uploaded zips are safely extracted,
-verified, and built with Railpack; build logs stream to the API and
-`broken-build` failures stay visible and permanent. Next: **M4 (real run)**.
-See `AGENTS.md`.
+Milestone **M4 (real run)** done — projects run in per-project Docker networks
+with CPU/memory/pid limits, health-checked before Traefik routes traffic to
+them, and can be stopped, started, restarted and redeployed from a stored zip;
+old images are pruned keeping the live one and its predecessor. Next:
+**M5 (database and env vars)**. See `AGENTS.md`.
 
 ## Requirements
 

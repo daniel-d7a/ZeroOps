@@ -104,7 +104,7 @@ handling.
 - [x] **M1** Auth, users, projects — sessions, CSRF, roles, quotas, Swagger
 - [x] **M2** Sources, upload, queue plumbing — fake build/run, retries, replicas
 - [x] **M3** Real build — safe unzip, railpack, log streaming
-- [ ] **M4** Real run — networks, container limits, health check, Traefik routing,
+- [x] **M4** Real run — networks, container limits, health check, Traefik routing,
       stop/start/restart/redeploy
 - [ ] **M5** Database and env vars
 - [ ] **M6** Vue frontend (user + admin)

@@ -53,7 +53,7 @@ Compose + infra healthy, migrations run.
 - [x] **M3.3** `fd9929a` — Railpack build with streamed batched logs, `image_ref`, skip-if-exists repair, BuildKit preflight, `DOCKER_API_VERSION` pin
 - [x] **M3.4** `79e6db8` — **[M3 gate]** hello built+live with logs, broken-build clean fail, hostile zips, skip-if-image-exists, duplicate job harmless
 
-## M4 — Real run 🔄 (in progress)
+## M4 — Real run ✅ (gate passed)
 
 *Done when: `hello-node.zip` produces a working `http://<slug>.localhost` URL, a
 second upload replaces it with no manual cleanup, and stop and start work as
@@ -68,21 +68,31 @@ described in plan §11.*
   Go 1.26 + docker v27.5.1 + go-connections v0.6.0 pins.
   *Battery: live URL via Traefik, clean switch on 2nd upload, crash-app fails permanently
   while old version keeps serving.*
-- [ ] **M4.2** — action endpoints: `POST /projects/:id/stop|start|restart` (create
-  `project_actions` row, publish run job, return action id), `GET /projects/:id/actions`,
-  `POST /admin/projects/:id/stop`. Schema ready (`project_actions`, `desired_state`).
-- [ ] **M4.3** — worker action handler (plan §8.6): lock + claim action (skip if
-  done/failed) → **stop** (delete route file, stop containers 10s grace, keep them,
-  `desired_state=stopped`) · **start** (start existing + probe + rewrite route, or
-  replace-container if missing, or permanent "image missing, use Redeploy") ·
-  **restart** (replace-container to apply new env) → record `done`/`failed`.
-- [ ] **M4.4** — redeploy endpoint: `POST /projects/:id/redeploy {sourceId?}`
-  (default latest source; pruned source → 404) → new deployment + build job.
-- [ ] **M4.5** — image prune after MarkLive: keep live image + the one before it
-  (TODO in run.go), Docker prune of the rest for that project.
-- [ ] **M4.6** — **[M4 gate]** plan §11: hello URL works; 2nd upload replaces with no
-  manual cleanup; stop → URL dead; start → restored without rebuild; image removed →
-  start fails with clear message, redeploy succeeds. Tick M4 + README.
+- [x] **M4.2** `f864d47` — action endpoints: `POST /projects/:id/stop|start|restart`
+  (ActionsService, partial unique index one-open-action-per-type → 409, publish
+  `{type:'action'}` to `run.x`), `GET /projects/:id/actions`, `POST /admin/projects/:id/stop`,
+  `PublisherService.publishAction`.
+- [x] **M4.3** `c263401` — worker action handler (plan §8.6): `Handle` dispatches
+  deploy/action; shared `replaceContainer`+`probe`+`permanentError`; **stop** (route
+  delete → stop 10s grace, keep containers → `stopped/stopped`) · **start** (reuse
+  existing + probe + route, or rebuild if gone, or permanent "image missing, use
+  Redeploy") · **restart** (replace-container); claim CAS, transient releases +
+  ladder, give-up fails the row.
+  *Battery: stop→URL dead, start→same container no rebuild, restart→new ID live,
+  nothing-to-start + image-missing permanent, 409 duplicate, replay skipped,
+  lock-busy retry.*
+- [x] **M4.4** `f9eaab7` — redeploy endpoint: `POST /projects/:id/redeploy {sourceId?}`
+  (default newest non-pruned source; pruned/foreign → 404, bad uuid → 400, active →
+  409), `kind=redeploy`; `queueDeployment` extracted (tx + publish + compensate,
+  upload keeps source insert in-tx via `beforeInsert`).
+- [x] **M4.5** `0de14fc` — image prune after MarkLive: `MarkLive` returns the
+  superseded image_ref; `RemoveProjectImages` lists `proj-<id>:*` and removes
+  everything but live + one before; log-only, never fails a live deploy.
+- [x] **M4.6** *(this commit)* — **[M4 gate]** plan §11: hello URL works; 2nd upload
+  replaces (hi→hi2) with no manual cleanup; stop → URL dead; start → restored with
+  same container and no new deployment; restart → new container, still live; image
+  removed → start fails "image missing, use Redeploy", redeploy succeeds. M4 ticked
+  in AGENTS.md + README status updated.
 
 ## M5 — Database and env vars ⬜
 
