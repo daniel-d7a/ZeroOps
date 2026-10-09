@@ -158,6 +158,42 @@ func (s *Store) LoadDeployment(ctx context.Context, deploymentID string) (projec
 	return projectID, true, nil
 }
 
+// SourceForDeployment returns the uploaded zip's storage path (relative to
+// UPLOADS_DIR) and its sha256 — plan §8.1 step 2. ok=false means the
+// deployment has no source row or the source was pruned by retention; the
+// build treats that as permanent (nothing to rebuild from).
+func (s *Store) SourceForDeployment(ctx context.Context, deploymentID string) (zipPath, checksum string, ok bool, err error) {
+	err = s.pool.QueryRow(ctx, `
+		SELECT src.path, src.sha256
+		FROM deployments d
+		JOIN sources src ON src.id = d.source_id
+		WHERE d.id = $1 AND src.deleted_at IS NULL`, deploymentID).Scan(&zipPath, &checksum)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("read source: %w", err)
+	}
+	return zipPath, checksum, true, nil
+}
+
+// AppendLogs inserts one batch of log lines for a deployment (plan §8.1 step
+// 4 streams railpack output into deploy_logs, batched ~once per second —
+// batching keeps a chatty build from turning into thousands of round trips).
+// lines must be non-empty; an empty batch is a no-op.
+func (s *Store) AppendLogs(ctx context.Context, deploymentID, stream string, lines []string) error {
+	if len(lines) == 0 {
+		return nil
+	}
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO deploy_logs (deployment_id, stream, line)
+		SELECT $1, $2, unnest($3::text[])`, deploymentID, stream, lines)
+	if err != nil {
+		return fmt.Errorf("append logs: %w", err)
+	}
+	return nil
+}
+
 // TryProjectLock takes the per-project advisory lock (plan §8) so two jobs for
 // the same project (e.g. stop + deploy) can never run at the same time.
 //
