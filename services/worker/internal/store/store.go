@@ -343,10 +343,14 @@ func (s *Store) MarkFailed(ctx context.Context, deploymentID, failure string) er
 // ok=false means the claim was stolen under us — the deferred Rollback undoes
 // the empty work; the caller acks and skips (the stealer owns the job now).
 // Rollback after Commit is a no-op, so one defer covers every error path.
-func (s *Store) MarkLive(ctx context.Context, deploymentID, projectID, workerID string) (ok bool, err error) {
+//
+// supersededImage is the previous live deployment's image_ref ("" on a first
+// deploy) — the caller needs it to prune old images keeping live + one before
+// (plan §8.2 step 6).
+func (s *Store) MarkLive(ctx context.Context, deploymentID, projectID, workerID string) (ok bool, supersededImage string, err error) {
 	transaction, err := s.pool.Begin(ctx)
 	if err != nil {
-		return false, fmt.Errorf("begin mark live: %w", err)
+		return false, "", fmt.Errorf("begin mark live: %w", err)
 	}
 	defer transaction.Rollback(ctx)
 
@@ -355,27 +359,30 @@ func (s *Store) MarkLive(ctx context.Context, deploymentID, projectID, workerID 
 		WHERE id = $1 AND status = 'starting' AND worker_id = $2`,
 		deploymentID, workerID)
 	if err != nil {
-		return false, fmt.Errorf("mark live: %w", err)
+		return false, "", fmt.Errorf("mark live: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return false, nil // claim lost — tx still empty, rolls back
+		return false, "", nil // claim lost — tx still empty, rolls back
 	}
-	if _, err := transaction.Exec(ctx, `
+	// UPDATE ... RETURNING: 0 rows (first deploy) reads as ErrNoRows.
+	err = transaction.QueryRow(ctx, `
 		UPDATE deployments SET status = 'superseded'
-		WHERE project_id = $1 AND status = 'live' AND id <> $2`,
-		projectID, deploymentID); err != nil {
-		return false, fmt.Errorf("supersede previous live: %w", err)
+		WHERE project_id = $1 AND status = 'live' AND id <> $2
+		RETURNING image_ref`,
+		projectID, deploymentID).Scan(&supersededImage)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return false, "", fmt.Errorf("supersede previous live: %w", err)
 	}
 	if _, err := transaction.Exec(ctx, `
 		UPDATE projects SET current_deployment_id = $1, status = 'running', desired_state = 'running'
 		WHERE id = $2`,
 		deploymentID, projectID); err != nil {
-		return false, fmt.Errorf("update project: %w", err)
+		return false, "", fmt.Errorf("update project: %w", err)
 	}
 	if err := transaction.Commit(ctx); err != nil {
-		return false, fmt.Errorf("commit mark live: %w", err)
+		return false, "", fmt.Errorf("commit mark live: %w", err)
 	}
-	return true, nil
+	return true, supersededImage, nil
 }
 
 // --- project actions (plan §8.6: stop / start / restart) ---------------------

@@ -23,6 +23,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
@@ -237,6 +238,44 @@ func (c *Client) StartContainer(ctx context.Context, name string) (ok bool, err 
 		return false, fmt.Errorf("start %s: %w", name, err)
 	}
 	return true, nil
+}
+
+// RemoveProjectImages removes the project's built images (tags proj-<id>:*)
+// except those in keep (plan §8.2 step 6: keep the live image and the one
+// before it — a restart of the superseded deployment still needs its image).
+// Callers log failures: an unremovable image is a disk leak, never a reason
+// to fail a deploy that is already live. Runs under the project lock, so two
+// workers never prune the same project at once.
+func (c *Client) RemoveProjectImages(ctx context.Context, projectID string, keep []string) error {
+	images, err := c.cli.ImageList(ctx, image.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("reference", "proj-"+projectID+":*")),
+	})
+	if err != nil {
+		return fmt.Errorf("list images: %w", err)
+	}
+	keepSet := make(map[string]struct{}, len(keep))
+	for _, tag := range keep {
+		keepSet[tag] = struct{}{}
+	}
+	for _, img := range images {
+		// A summary can carry several tags (same ID under different names);
+		// remove only when none of them is kept.
+		kept := false
+		for _, tag := range img.RepoTags {
+			if _, ok := keepSet[tag]; ok {
+				kept = true
+				break
+			}
+		}
+		if kept {
+			continue
+		}
+		if _, err := c.cli.ImageRemove(ctx, img.ID, image.RemoveOptions{}); err != nil &&
+			!errdefs.IsNotFound(err) {
+			return fmt.Errorf("remove %s: %w", img.ID, err)
+		}
+	}
+	return nil
 }
 
 // RemoveContainer force-removes one container by name (plan §8.3 step 4:

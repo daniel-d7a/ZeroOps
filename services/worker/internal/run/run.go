@@ -162,9 +162,7 @@ func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Deliv
 	}
 
 	// --- finish (plan §8.2 step 6) ----------------------------------------
-	// TODO(M4.5): prune old images for this project — keep the live one and
-	// the one before it.
-	live, err := handler.Store.MarkLive(ctx, job.DeploymentID, projectID, handler.WorkerID)
+	live, supersededImage, err := handler.Store.MarkLive(ctx, job.DeploymentID, projectID, handler.WorkerID)
 	if err != nil {
 		// Claim held, status still 'starting' (tx rolled back) — release it.
 		return handler.transient(ctx, delivery, job.DeploymentID, "built", logger, err)
@@ -174,6 +172,18 @@ func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Deliv
 		return nil
 	}
 	logger.Info("deploy done: live", "slug", slug)
+
+	// Prune this project's old images (plan §8.2 step 6): keep the live one
+	// and the one before it — a restart of the superseded deployment still
+	// needs its image. Never fails the deploy (log-only, like old-container
+	// cleanup): the app is live, a prune problem is a disk leak.
+	keep := []string{imageRef}
+	if supersededImage != "" {
+		keep = append(keep, supersededImage)
+	}
+	if err := handler.Docker.RemoveProjectImages(ctx, projectID, keep); err != nil {
+		logger.Error("image prune failed", "error", err)
+	}
 	return nil
 }
 
