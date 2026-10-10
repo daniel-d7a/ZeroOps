@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, ParseUUIDPipe, Post, Put, Query, Req, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiConsumes, ApiHeader, ApiTags } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Request } from 'express';
@@ -10,8 +10,10 @@ import { PageQueryDto } from '../common/page-query.dto';
 import { SessionGuard } from '../auth/session.guard';
 import { ActionsService } from './actions.service';
 import { CreateProjectDto } from './dto/create-project.dto';
+import { PutEnvDto } from './dto/put-env.dto';
 import { RedeployDto } from './dto/redeploy.dto';
 import { DeploymentsService, MAX_UPLOAD_BYTES } from './deployments.service';
+import { EnvService } from './env.service';
 import { ProjectsService } from './projects.service';
 
 const uploadStorage = multer.diskStorage({
@@ -31,6 +33,7 @@ export class ProjectsController {
     private readonly projects: ProjectsService,
     private readonly deployments: DeploymentsService,
     private readonly actions: ActionsService,
+    private readonly env: EnvService,
   ) {}
 
   @Post()
@@ -103,6 +106,28 @@ export class ProjectsController {
   @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
   restart(@Param('id', ParseUUIDPipe) id: string, @Req() req: Request) {
     return this.actions.request(id, req.session.uid!, 'restart');
+  }
+
+  @Get(':id/env')
+  listEnv(@Param('id', ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.env.list(id, req.session.uid!);
+  }
+
+  @Put(':id/env/:key')
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
+  putEnv(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('key') key: string,
+    @Body() dto: PutEnvDto,
+    @Req() req: Request,
+  ) {
+    return this.env.put(id, req.session.uid!, key, dto.value);
+  }
+
+  @Delete(':id/env/:key')
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
+  deleteEnv(@Param('id', ParseUUIDPipe) id: string, @Param('key') key: string, @Req() req: Request) {
+    return this.env.remove(id, req.session.uid!, key);
   }
 
   @Get(':id')

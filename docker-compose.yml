@@ -83,6 +83,7 @@ services:
       PORT: 3000
       NODE_ENV: production
       SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
       REGISTRATION_ENABLED: ${REGISTRATION_ENABLED:-true}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
@@ -159,6 +160,7 @@ services:
     environment:
       NODE_ID: node-1
       WORKER_ROLES: build,run
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
       BASE_DOMAIN: ${BASE_DOMAIN:-localhost}
       BUILDKIT_HOST: docker-container://buildkit
       # Worker image ships Debian's old docker CLI (API 1.41) but the host
