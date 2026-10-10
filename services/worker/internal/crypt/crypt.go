@@ -28,7 +28,9 @@ func ParseKey(hexKey string) ([]byte, error) {
 	return key, nil
 }
 
-// Encrypt seals plaintext with a fresh random IV.
+// Encrypt seals plaintext with a fresh random IV. Layout matches crypto.ts:
+// iv || authTag || ciphertext — note GCM's own Seal appends the tag AFTER the
+// ciphertext, so the three parts are rearranged on the way out.
 func Encrypt(key []byte, plaintext string) (string, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -42,11 +44,19 @@ func Encrypt(key []byte, plaintext string) (string, error) {
 	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
 		return "", err
 	}
-	sealed := gcm.Seal(iv, iv, []byte(plaintext), nil) // nonce || ciphertext+tag
-	return base64.StdEncoding.EncodeToString(sealed), nil
+	sealed := gcm.Seal(nil, iv, []byte(plaintext), nil) // ciphertext || tag
+	tag := sealed[len(sealed)-gcm.Overhead():]
+	ct := sealed[:len(sealed)-gcm.Overhead()]
+	out := make([]byte, 0, len(iv)+len(tag)+len(ct))
+	out = append(out, iv...)
+	out = append(out, tag...)
+	out = append(out, ct...)
+	return base64.StdEncoding.EncodeToString(out), nil
 }
 
-// Decrypt opens a value written by the API (or by Encrypt above).
+// Decrypt opens a value written by the API (or by Encrypt above). The wire
+// layout is iv || tag || ciphertext; GCM's Open wants the tag appended after
+// the ciphertext, so rebuild that layout before calling it.
 func Decrypt(key []byte, encoded string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
@@ -60,10 +70,17 @@ func Decrypt(key []byte, encoded string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(raw) < gcm.NonceSize() {
+	header := gcm.NonceSize() + gcm.Overhead() // iv + tag
+	if len(raw) < header {
 		return "", fmt.Errorf("ciphertext too short")
 	}
-	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	iv := raw[:gcm.NonceSize()]
+	tag := raw[gcm.NonceSize():header]
+	ct := raw[header:]
+	openInput := make([]byte, 0, len(ct)+len(tag))
+	openInput = append(openInput, ct...)
+	openInput = append(openInput, tag...)
+	plain, err := gcm.Open(nil, iv, openInput, nil)
 	if err != nil {
 		return "", fmt.Errorf("decrypt: %w", err)
 	}

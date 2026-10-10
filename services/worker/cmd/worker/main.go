@@ -143,6 +143,7 @@ func main() {
 			MaxRunning:         cfg.MaxRunningPerNode,
 			Provision:          provisioner,
 			StudentDBContainer: cfg.StudentDBContainer,
+			EncryptionKey:      cfg.EncryptionKey,
 		}
 		runQueueName := "run." + cfg.NodeID + ".q"
 		runDeliveries, err := broker.ConsumeRun(cfg.NodeID, cfg.RunPrefetch)

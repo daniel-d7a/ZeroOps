@@ -23,6 +23,7 @@ import (
 
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
+	"zeroops/worker/internal/crypt"
 	"zeroops/worker/internal/docker"
 	"zeroops/worker/internal/provision"
 	"zeroops/worker/internal/queue"
@@ -49,6 +50,7 @@ type Handler struct {
 	// M5 (plan §8.5):
 	Provision          *provision.Provisioner // project databases on student-db
 	StudentDBContainer string                 // container to join project networks when wants_db
+	EncryptionKey      []byte                 // AES-256 key for env values / db passwords
 }
 
 // jobMessage is the shared message envelope (plan §6): ids only.
@@ -162,7 +164,9 @@ func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Deliv
 	// project — later deploys see status 'ready' and skip the DDL.
 	if wantsDb {
 		if err := handler.Provision.Ensure(ctx, projectID); err != nil {
-			return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
+			// Release target is the pre-claim state ('built'), not the current
+			// one — ReleaseClaim validates that.
+			return handler.transient(ctx, delivery, job.DeploymentID, "built", logger, err)
 		}
 	}
 	if err := handler.replaceContainer(ctx, projectID, job.DeploymentID, slug, imageRef, wantsDb, logger); err != nil {
@@ -170,7 +174,7 @@ func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Deliv
 		if errors.As(err, &perm) {
 			return handler.permanent(ctx, job.DeploymentID, logger, perm.Error())
 		}
-		return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
+		return handler.transient(ctx, delivery, job.DeploymentID, "built", logger, err)
 	}
 
 	// --- finish (plan §8.2 step 6) ----------------------------------------
@@ -216,6 +220,9 @@ func (handler *Handler) permanent(ctx context.Context, deploymentID string, logg
 func (handler *Handler) transient(ctx context.Context, delivery amqp091.Delivery, deploymentID, releaseTo string, logger *slog.Logger, cause error) error {
 	if releaseTo != "" {
 		if err := handler.Store.ReleaseClaim(ctx, deploymentID, handler.WorkerID, releaseTo); err != nil {
+			// Log the original cause too — otherwise a release failure masks
+			// why the job was transient in the first place.
+			logger.Error("release claim failed", "error", err, "cause", cause)
 			return err
 		}
 	}
@@ -272,14 +279,18 @@ func (handler *Handler) replaceContainer(ctx context.Context, projectID, deploym
 	}
 
 	name := containerName(deploymentID)
-	// Env: user variables arrive with M5 (decrypted) — for now the platform
-	// contract is just the port (plan §8.2 step 3). DATABASE_URL joins with
-	// M5 (plan §8.5), only when wants_db.
+	// Env is loaded fresh on every container create (plan §8.2 steps 3-4) —
+	// that is exactly why a restart applies changed env vars while a running
+	// container keeps its old ones.
+	env, err := handler.containerEnv(ctx, projectID, wantsDb)
+	if err != nil {
+		return err
+	}
 	spec := docker.StudentSpec{
 		Name:         name,
 		Image:        imageRef,
 		Network:      networkName,
-		Env:          []string{"PORT=3000"},
+		Env:          env,
 		ProjectID:    projectID,
 		DeploymentID: deploymentID,
 	}
@@ -321,6 +332,45 @@ func (handler *Handler) probe(ctx context.Context, networkName, container string
 	probeErr := docker.ProbeTCP(ctx, container+":3000")
 	leave()
 	return probeErr
+}
+
+// containerEnv builds the student container's environment (plan §8.2 steps
+// 3-4): user vars decrypted, then the reserved keys the platform owns —
+// PORT (fixed 3000, §8.3) and DATABASE_URL when the project has a database
+// (§8.5). The API rejects user-supplied values for both reserved keys, so
+// appending them here can never be overridden (AGENTS invariant).
+// Never logged: values are decrypted straight into the container spec.
+func (handler *Handler) containerEnv(ctx context.Context, projectID string, wantsDb bool) ([]string, error) {
+	vars, err := handler.Store.EnvVars(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	env := make([]string, 0, len(vars)+2)
+	for _, v := range vars {
+		plain, err := crypt.Decrypt(handler.EncryptionKey, v.ValueEncrypted)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt env var %s: %w", v.Key, err)
+		}
+		env = append(env, v.Key+"="+plain)
+	}
+	env = append(env, "PORT=3000")
+
+	if wantsDb {
+		db, err := handler.Store.LoadDatabase(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		password, err := crypt.Decrypt(handler.EncryptionKey, db.PasswordEncrypted)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt database password: %w", err)
+		}
+		// Password is base64url (unreserved in a URL), db/user are p_<hex> —
+		// no percent-encoding needed. student-db resolves on the project
+		// network (§8.5 joined it in replaceContainer).
+		env = append(env, fmt.Sprintf("DATABASE_URL=postgres://%s:%s@%s:5432/%s",
+			db.DbUser, password, handler.StudentDBContainer, db.DbName))
+	}
+	return env, nil
 }
 
 // --- actions (plan §8.6) ---------------------------------------------------

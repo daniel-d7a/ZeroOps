@@ -493,6 +493,34 @@ func (s *Store) SetProjectState(ctx context.Context, projectID, desired, status 
 	return nil
 }
 
+// EnvVar is one env_vars row with the value still encrypted — decryption is
+// the run role's job (plan §8.2 step 3); this package never sees plaintext.
+type EnvVar struct {
+	Key            string
+	ValueEncrypted string
+}
+
+// EnvVars returns the project's environment variables (plan §8.2 step 3),
+// key-ordered for deterministic env slices.
+func (s *Store) EnvVars(ctx context.Context, projectID string) ([]EnvVar, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT key, value_encrypted FROM env_vars
+		WHERE project_id = $1 ORDER BY key`, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("load env vars: %w", err)
+	}
+	defer rows.Close()
+	var out []EnvVar
+	for rows.Next() {
+		var v EnvVar
+		if err := rows.Scan(&v.Key, &v.ValueEncrypted); err != nil {
+			return nil, fmt.Errorf("scan env var: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // --- project databases (plan §8.5) -----------------------------------------
 
 // DatabaseInfo is one project_databases row — everything the provision step
@@ -526,7 +554,7 @@ func (s *Store) EnsureDatabaseRow(ctx context.Context, projectID, dbName, dbUser
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Row already exists (prior attempt): read it back — its password is
 		// the one stored in student-db, so re-running DDL must use it.
-		return s.loadDatabase(ctx, projectID)
+		return s.LoadDatabase(ctx, projectID)
 	}
 	if err != nil {
 		return DatabaseInfo{}, fmt.Errorf("ensure database row: %w", err)
@@ -534,8 +562,9 @@ func (s *Store) EnsureDatabaseRow(ctx context.Context, projectID, dbName, dbUser
 	return DatabaseInfo{ProjectID: projectID, DbName: dbName, DbUser: dbUser, PasswordEncrypted: passwordEncrypted, Status: status}, nil
 }
 
-// loadDatabase reads the existing row (see EnsureDatabaseRow race branch).
-func (s *Store) loadDatabase(ctx context.Context, projectID string) (DatabaseInfo, error) {
+// LoadDatabase reads the project's database row — the run role needs it to
+// build DATABASE_URL (plan §8.2 step 4).
+func (s *Store) LoadDatabase(ctx context.Context, projectID string) (DatabaseInfo, error) {
 	var info DatabaseInfo
 	err := s.pool.QueryRow(ctx, `
 		SELECT project_id::text, db_name, db_user, password_encrypted, status
