@@ -106,7 +106,7 @@ handling.
 - [x] **M3** Real build — safe unzip, railpack, log streaming
 - [x] **M4** Real run — networks, container limits, health check, Traefik routing,
       stop/start/restart/redeploy
-- [ ] **M5** Database and env vars
+- [x] **M5** Database and env vars
 - [ ] **M6** Vue frontend (user + admin)
 - [ ] **M7** Hardening and tests (plan §10 + §11), README complete
 

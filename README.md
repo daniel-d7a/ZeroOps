@@ -8,11 +8,11 @@ Spec: `plan.md`. Agent operating manual: `AGENTS.md`.
 
 ## Status
 
-Milestone **M4 (real run)** done — projects run in per-project Docker networks
-with CPU/memory/pid limits, health-checked before Traefik routes traffic to
-them, and can be stopped, started, restarted and redeployed from a stored zip;
-old images are pruned keeping the live one and its predecessor. Next:
-**M5 (database and env vars)**. See `AGENTS.md`.
+Milestone **M5 (database and env vars)** done — projects can get a role-isolated
+Postgres database (provisioned once per project, `DATABASE_URL` injected at
+container create), and user env vars are stored encrypted (AES-256-GCM),
+rejected for reserved keys, and applied on restart. Next:
+**M6 (Vue frontend)**. See `AGENTS.md`.
 
 ## Requirements
 

@@ -94,27 +94,32 @@ described in plan §11.*
   removed → start fails "image missing, use Redeploy", redeploy succeeds. M4 ticked
   in AGENTS.md + README status updated.
 
-## M5 — Database and env vars ⬜
+## M5 — Database and env vars ✅ (gate passed)
 
 *Done when: `node-with-db.zip` and `env-echo.zip` work, redeploying keeps the same
 database, and one project's role cannot connect to another's database.*
 
-- [ ] **M5.1** — schema: env-var storage (project-scoped, ≤50/project) +
+- [x] **M5.1** (`fc6c0d8`) — schema: env-var storage (project-scoped, ≤50/project) +
   `project_databases` table; migration.
-- [ ] **M5.2** — env endpoints (plan §5): `GET /projects/:id/env`,
+- [x] **M5.2** (`accf2b7`) — env endpoints (plan §5): `GET /projects/:id/env`,
   `PUT /projects/:id/env/:key`, `DELETE /projects/:id/env/:key` — key regex
   `^[A-Z_][A-Z0-9_]*`, reserved `PORT`/`DATABASE_URL` rejected, values encrypted
   AES-256-GCM (`ENCRYPTION_KEY`), returned only to owner, never logged.
-- [ ] **M5.3** — DB provisioning in deploy path (plan §8.5): insert
+- [x] **M5.3** (`d7b2f5d`) — DB provisioning in deploy path (plan §8.5): insert
   `project_databases` (encrypted generated password) → validate identifier
   `^p_[0-9a-f]{32}$` → `CREATE ROLE`/`CREATE ROLE`-if-missing + `REVOKE CONNECT` →
   status `ready`; student-db joins the project network.
-- [ ] **M5.4** — worker injects env at container create: user vars + reserved
+- [x] **M5.4** (`8958741`) — worker injects env at container create: user vars + reserved
   `PORT=3000` + `DATABASE_URL` (from `project_databases` when `wants_db`);
-  restart action applies changes (banner is frontend, M6).
-- [ ] **M5.5** — **[M5 gate]** fixtures `node-with-db.zip`, `env-echo.zip` (set var →
-  restart → visible), cross-project role isolation attempt fails; redeploy keeps the
-  same DB. Tick M5 + README.
+  restart action applies changes (banner is frontend, M6). Fixed two bugs found
+  by the battery: invalid `ReleaseClaim("starting")` target (latent since M4.1)
+  and Go/TS GCM wire-layout mismatch (`iv‖ct‖tag` vs `iv‖tag‖ct`), pinned by
+  an API-generated vector in `crypt_test.go`.
+- [x] **M5.5** — **[M5 gate]** fixtures `node-with-db.zip`, `env-echo.zip` committed
+  in `fixtures/` (sources alongside); env-echo: set var → still old → restart →
+  visible; node-with-db: `/db` round trip works, redeploy keeps the same database
+  (old rows survive); cross-project role isolation: own role connects, both
+  cross-tempts denied `CONNECT privilege`. Tick M5 + README.
 
 ## M6 — Vue frontend ⬜
 
