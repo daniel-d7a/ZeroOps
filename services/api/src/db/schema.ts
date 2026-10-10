@@ -18,6 +18,7 @@ export const deploymentStatus = pgEnum('deployment_status', [
 export const deploymentKind = pgEnum('deployment_kind', ['upload', 'redeploy']);
 export const actionType = pgEnum('action_type', ['stop', 'start', 'restart']);
 export const actionStatus = pgEnum('action_status', ['queued', 'running', 'done', 'failed']);
+export const databaseStatus = pgEnum('database_status', ['provisioning', 'ready']);
 
 export type UserRole = (typeof userRole.enumValues)[number];
 export type UserStatus = (typeof userStatus.enumValues)[number];
@@ -27,6 +28,7 @@ export type DeploymentStatus = (typeof deploymentStatus.enumValues)[number];
 export type DeploymentKind = (typeof deploymentKind.enumValues)[number];
 export type ActionType = (typeof actionType.enumValues)[number];
 export type ActionStatus = (typeof actionStatus.enumValues)[number];
+export type DatabaseStatus = (typeof databaseStatus.enumValues)[number];
 
 export const users = pgTable('users', {
   id: uuid('id').defaultRandom().primaryKey(),
@@ -166,6 +168,46 @@ export const projectActions = pgTable(
       .where(sql`status in ('queued', 'running')`),
   ],
 );
+
+/**
+ * User environment variables (plan §5/§7): values are AES-256-GCM ciphertext
+ * (never plaintext, never logged), unique per (project, key) — PUT upserts.
+ * Key/value length limits are validated at the endpoint (plan §7: key
+ * `^[A-Z_][A-Z0-9_]*$` ≤128, value ≤4 KB, reserved PORT/DATABASE_URL rejected).
+ */
+export const envVars = pgTable(
+  'env_vars',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    projectId: uuid('project_id')
+      .notNull()
+      .references(() => projects.id),
+    key: varchar('key', { length: 128 }).notNull(),
+    valueEncrypted: text('value_encrypted').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('env_vars_project_key_idx').on(t.projectId, t.key)],
+);
+
+/**
+ * Per-project student database (plan §8.5): exactly one row per project
+ * (unique project_id), created before touching student-db, flipped
+ * provisioning → ready once role + database exist. db_name/db_user are the
+ * validated `p_<project uuid no dashes>` identifiers; password is ciphertext.
+ */
+export const projectDatabases = pgTable('project_databases', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  projectId: uuid('project_id')
+    .notNull()
+    .unique()
+    .references(() => projects.id),
+  dbName: varchar('db_name', { length: 63 }).notNull(),
+  dbUser: varchar('db_user', { length: 63 }).notNull(),
+  passwordEncrypted: text('password_encrypted').notNull(),
+  status: databaseStatus('status').notNull().default('provisioning'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
 
 /** Worker heartbeats (plan §5): id = hostname, last_seen_at upserted every 15s. */
 export const workers = pgTable('workers', {
