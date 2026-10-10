@@ -24,6 +24,7 @@ import (
 	amqp091 "github.com/rabbitmq/amqp091-go"
 
 	"zeroops/worker/internal/docker"
+	"zeroops/worker/internal/provision"
 	"zeroops/worker/internal/queue"
 	"zeroops/worker/internal/route"
 	"zeroops/worker/internal/store"
@@ -45,6 +46,9 @@ type Handler struct {
 	Router           *route.Writer
 	TraefikContainer string
 	MaxRunning       int
+	// M5 (plan §8.5):
+	Provision          *provision.Provisioner // project databases on student-db
+	StudentDBContainer string                 // container to join project networks when wants_db
 }
 
 // jobMessage is the shared message envelope (plan §6): ids only.
@@ -90,7 +94,7 @@ func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Deliv
 	logger := handler.Logger.With("deployment_id", job.DeploymentID)
 
 	// Messages carry ids only — reload everything from the DB (AGENTS).
-	projectID, slug, imageRef, found, err := handler.Store.LoadDeployment(ctx, job.DeploymentID)
+	projectID, slug, imageRef, wantsDb, found, err := handler.Store.LoadDeployment(ctx, job.DeploymentID)
 	if err != nil {
 		return handler.transient(ctx, delivery, job.DeploymentID, "", logger, err)
 	}
@@ -153,7 +157,15 @@ func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Deliv
 		// will conjure one (plan §6 permanent).
 		return handler.permanent(ctx, job.DeploymentID, logger, "deployment has no image — use Redeploy")
 	}
-	if err := handler.replaceContainer(ctx, projectID, job.DeploymentID, slug, imageRef, logger); err != nil {
+	// Database first (plan §8.2 step 4 → §8.5): role + database must exist
+	// before the container starts and gets DATABASE_URL (M5.4). Once per
+	// project — later deploys see status 'ready' and skip the DDL.
+	if wantsDb {
+		if err := handler.Provision.Ensure(ctx, projectID); err != nil {
+			return handler.transient(ctx, delivery, job.DeploymentID, "starting", logger, err)
+		}
+	}
+	if err := handler.replaceContainer(ctx, projectID, job.DeploymentID, slug, imageRef, wantsDb, logger); err != nil {
 		var perm permanentError
 		if errors.As(err, &perm) {
 			return handler.permanent(ctx, job.DeploymentID, logger, perm.Error())
@@ -234,13 +246,14 @@ func (handler *Handler) dead(ctx context.Context, delivery amqp091.Delivery, rea
 // --- replace-container (plan §8.3) -----------------------------------------
 
 // replaceContainer is the §8.3 step 4-5 sequence, shared by deploy, start
-// (container gone) and restart: ensure the project network, join Traefik,
-// run a fresh container from imageRef, probe it, write the route, remove the
-// old containers. Returns permanentError for health-check/image failures
-// (plan §6 permanent) so every caller classifies the same failure the same
-// way — no point retrying a container that immediately dies or an image that
-// does not exist.
-func (handler *Handler) replaceContainer(ctx context.Context, projectID, deploymentID, slug, imageRef string, logger *slog.Logger) error {
+// (container gone) and restart: ensure the project network, join Traefik
+// (and student-db when the project has a database — §8.5: it reaches the app
+// by joining this network), run a fresh container from imageRef, probe it,
+// write the route, remove the old containers. Returns permanentError for
+// health-check/image failures (plan §6 permanent) so every caller classifies
+// the same failure the same way — no point retrying a container that
+// immediately dies or an image that does not exist.
+func (handler *Handler) replaceContainer(ctx context.Context, projectID, deploymentID, slug, imageRef string, wantsDb bool, logger *slog.Logger) error {
 	networkName, err := handler.Docker.EnsureProjectNetwork(ctx, projectID)
 	if err != nil {
 		return err
@@ -249,6 +262,13 @@ func (handler *Handler) replaceContainer(ctx context.Context, projectID, deploym
 	// through the file-provider route (§8.4). Idempotent.
 	if err := handler.Docker.ConnectContainer(ctx, networkName, handler.TraefikContainer); err != nil {
 		return err
+	}
+	// student-db joins too (plan §8.5): the app connects to it at the fixed
+	// hostname student-db. Idempotent, so start/restart re-run it safely.
+	if wantsDb {
+		if err := handler.Docker.ConnectContainer(ctx, networkName, handler.StudentDBContainer); err != nil {
+			return err
+		}
 	}
 
 	name := containerName(deploymentID)
@@ -430,7 +450,7 @@ func (handler *Handler) runAction(ctx context.Context, action store.ActionInfo) 
 		} else {
 			// Container gone (pruned, crashed past recovery): rebuild from the
 			// current image (plan §8.3 again).
-			if err := handler.replaceContainer(ctx, action.ProjectID, action.DeploymentID, action.Slug, action.ImageRef, handler.Logger); err != nil {
+			if err := handler.replaceContainer(ctx, action.ProjectID, action.DeploymentID, action.Slug, action.ImageRef, action.WantsDB, handler.Logger); err != nil {
 				var perm permanentError
 				if errors.As(err, &perm) {
 					return perm.Error(), nil
@@ -447,7 +467,7 @@ func (handler *Handler) runAction(ctx context.Context, action store.ActionInfo) 
 		if action.DeploymentID == "" || action.ImageRef == "" {
 			return "nothing to restart: no deployment yet — upload first", nil
 		}
-		if err := handler.replaceContainer(ctx, action.ProjectID, action.DeploymentID, action.Slug, action.ImageRef, handler.Logger); err != nil {
+		if err := handler.replaceContainer(ctx, action.ProjectID, action.DeploymentID, action.Slug, action.ImageRef, action.WantsDB, handler.Logger); err != nil {
 			var perm permanentError
 			if errors.As(err, &perm) {
 				return perm.Error(), nil

@@ -147,21 +147,22 @@ func (s *Store) NodeID(ctx context.Context, deploymentID string) (string, bool, 
 
 // LoadDeployment returns everything the run role needs to place a deployment
 // (plan §8.2): the project id, the project's slug (builds the public URL,
-// plan §8.4) and the image reference the build role stored — image_ref is
-// read only from here (AGENTS invariant). found=false means the row is gone.
-func (s *Store) LoadDeployment(ctx context.Context, deploymentID string) (projectID, slug, imageRef string, found bool, err error) {
+// plan §8.4), wants_db (whether to provision/inject a database, §8.5) and the
+// image reference the build role stored — image_ref is read only from here
+// (AGENTS invariant). found=false means the row is gone.
+func (s *Store) LoadDeployment(ctx context.Context, deploymentID string) (projectID, slug, imageRef string, wantsDb bool, found bool, err error) {
 	err = s.pool.QueryRow(ctx, `
-		SELECT d.project_id, p.slug, COALESCE(d.image_ref, '')
+		SELECT d.project_id, p.slug, p.wants_db, COALESCE(d.image_ref, '')
 		FROM deployments d
 		JOIN projects p ON p.id = d.project_id
-		WHERE d.id = $1`, deploymentID).Scan(&projectID, &slug, &imageRef)
+		WHERE d.id = $1`, deploymentID).Scan(&projectID, &slug, &wantsDb, &imageRef)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", "", false, nil
+		return "", "", "", false, false, nil
 	}
 	if err != nil {
-		return "", "", "", false, fmt.Errorf("read deployment: %w", err)
+		return "", "", "", false, false, fmt.Errorf("read deployment: %w", err)
 	}
-	return projectID, slug, imageRef, true, nil
+	return projectID, slug, imageRef, wantsDb, true, nil
 }
 
 // SourceForDeployment returns the owning project id plus the uploaded zip's
@@ -388,15 +389,17 @@ func (s *Store) MarkLive(ctx context.Context, deploymentID, projectID, workerID 
 // --- project actions (plan §8.6: stop / start / restart) ---------------------
 
 // ActionInfo is everything the run handler needs to execute one action: the
-// message carries only the action id, so the slug and the current
-// deployment's image ride along here — start/restart can rewrite the route
-// and rebuild a missing container without further queries.
+// message carries only the action id, so the slug, wants_db flag and the
+// current deployment's image ride along here — start/restart can rewrite the
+// route, rebuild a missing container and re-join student-db without further
+// queries.
 type ActionInfo struct {
 	ID           string
 	ProjectID    string
 	Type         string // stop | start | restart
 	Status       string // queued | running | done | failed
 	Slug         string
+	WantsDB      bool
 	DeploymentID string // projects.current_deployment_id ("" if never deployed)
 	ImageRef     string // its image ("" if none)
 }
@@ -406,14 +409,15 @@ type ActionInfo struct {
 func (s *Store) LoadAction(ctx context.Context, actionID string) (ActionInfo, bool, error) {
 	var info ActionInfo
 	err := s.pool.QueryRow(ctx, `
-		SELECT a.id, a.project_id, a.type, a.status, p.slug,
+		SELECT a.id, a.project_id, a.type, a.status, p.slug, p.wants_db,
 		       COALESCE(p.current_deployment_id::text, ''),
 		       COALESCE(d.image_ref, '')
 		FROM project_actions a
 		JOIN projects p ON p.id = a.project_id
 		LEFT JOIN deployments d ON d.id = p.current_deployment_id
 		WHERE a.id = $1`, actionID).Scan(
-		&info.ID, &info.ProjectID, &info.Type, &info.Status, &info.Slug, &info.DeploymentID, &info.ImageRef)
+		&info.ID, &info.ProjectID, &info.Type, &info.Status, &info.Slug, &info.WantsDB,
+		&info.DeploymentID, &info.ImageRef)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ActionInfo{}, false, nil
 	}
@@ -485,6 +489,75 @@ func (s *Store) SetProjectState(ctx context.Context, projectID, desired, status 
 		projectID, desired, status)
 	if err != nil {
 		return fmt.Errorf("set project state: %w", err)
+	}
+	return nil
+}
+
+// --- project databases (plan §8.5) -----------------------------------------
+
+// DatabaseInfo is one project_databases row — everything the provision step
+// needs. Status gates the flow: 'provisioning' means DDL still to run (a
+// previous attempt died mid-way, or we just inserted it), 'ready' means the
+// role and database exist and later deploys skip the DDL entirely.
+type DatabaseInfo struct {
+	ProjectID         string
+	DbName            string // validated p_<project uuid no dashes>
+	DbUser            string
+	PasswordEncrypted string // AES-256-GCM, decrypt with ENCRYPTION_KEY
+	Status            string
+}
+
+// EnsureDatabaseRow inserts the provisioning row if absent (plan §8.5 step 1:
+// the row with an encrypted password exists BEFORE anything touches
+// student-db) and always returns the stored row — ON CONFLICT DO NOTHING
+// handles the race, RETURNING handles the fresh insert, so both paths end in
+// one query. The caller then uses row.PasswordEncrypted, never its own
+// freshly generated password: if the insert lost the race, the winner's
+// password is the one student-db will end up with.
+func (s *Store) EnsureDatabaseRow(ctx context.Context, projectID, dbName, dbUser, passwordEncrypted string) (DatabaseInfo, error) {
+	var status string
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO project_databases (project_id, db_name, db_user, password_encrypted)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (project_id) DO NOTHING
+		RETURNING db_name, db_user, password_encrypted, status`,
+		projectID, dbName, dbUser, passwordEncrypted).Scan(
+		&dbName, &dbUser, &passwordEncrypted, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// Row already exists (prior attempt): read it back — its password is
+		// the one stored in student-db, so re-running DDL must use it.
+		return s.loadDatabase(ctx, projectID)
+	}
+	if err != nil {
+		return DatabaseInfo{}, fmt.Errorf("ensure database row: %w", err)
+	}
+	return DatabaseInfo{ProjectID: projectID, DbName: dbName, DbUser: dbUser, PasswordEncrypted: passwordEncrypted, Status: status}, nil
+}
+
+// loadDatabase reads the existing row (see EnsureDatabaseRow race branch).
+func (s *Store) loadDatabase(ctx context.Context, projectID string) (DatabaseInfo, error) {
+	var info DatabaseInfo
+	err := s.pool.QueryRow(ctx, `
+		SELECT project_id::text, db_name, db_user, password_encrypted, status
+		FROM project_databases WHERE project_id = $1`, projectID).Scan(
+		&info.ProjectID, &info.DbName, &info.DbUser, &info.PasswordEncrypted, &info.Status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return DatabaseInfo{}, fmt.Errorf("database row disappeared: %s", projectID)
+	}
+	if err != nil {
+		return DatabaseInfo{}, fmt.Errorf("load database row: %w", err)
+	}
+	return info, nil
+}
+
+// MarkDatabaseReady flips provisioning → ready after the DDL succeeded
+// (plan §8.5 last step). CAS on 'provisioning': a ready row stays ready.
+func (s *Store) MarkDatabaseReady(ctx context.Context, projectID string) error {
+	_, err := s.pool.Exec(ctx, `
+		UPDATE project_databases SET status = 'ready'
+		WHERE project_id = $1 AND status = 'provisioning'`, projectID)
+	if err != nil {
+		return fmt.Errorf("mark database ready: %w", err)
 	}
 	return nil
 }

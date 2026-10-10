@@ -31,6 +31,7 @@ import (
 	"zeroops/worker/internal/config"
 	"zeroops/worker/internal/docker"
 	"zeroops/worker/internal/log"
+	"zeroops/worker/internal/provision"
 	"zeroops/worker/internal/queue"
 	"zeroops/worker/internal/route"
 	"zeroops/worker/internal/run"
@@ -127,15 +128,21 @@ func main() {
 			logger.Error("docker unavailable", "error", err)
 			os.Exit(1)
 		}
+		// Student-db provisioning (plan §8.5) — pool is lazy, no ping: a
+		// student-db outage surfaces as a retried deploy, not a crash-loop.
+		provisioner := provision.New(datastore, cfg.StudentDBURL, cfg.EncryptionKey, logger)
+		defer provisioner.Close()
 		runRole := &run.Handler{
-			Store:            datastore,
-			Broker:           broker,
-			WorkerID:         workerID,
-			Logger:           logger,
-			Docker:           dockerClient,
-			Router:           &route.Writer{Dir: cfg.DynamicConfigDir, Domain: cfg.BaseDomain},
-			TraefikContainer: cfg.TraefikContainer,
-			MaxRunning:       cfg.MaxRunningPerNode,
+			Store:              datastore,
+			Broker:             broker,
+			WorkerID:           workerID,
+			Logger:             logger,
+			Docker:             dockerClient,
+			Router:             &route.Writer{Dir: cfg.DynamicConfigDir, Domain: cfg.BaseDomain},
+			TraefikContainer:   cfg.TraefikContainer,
+			MaxRunning:         cfg.MaxRunningPerNode,
+			Provision:          provisioner,
+			StudentDBContainer: cfg.StudentDBContainer,
 		}
 		runQueueName := "run." + cfg.NodeID + ".q"
 		runDeliveries, err := broker.ConsumeRun(cfg.NodeID, cfg.RunPrefetch)

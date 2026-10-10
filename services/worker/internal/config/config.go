@@ -10,11 +10,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"zeroops/worker/internal/crypt"
 )
 
 // minSchemaMigration: rows required in drizzle.__drizzle_migrations before
 // this worker runs (plan §2, AGENTS invariant). Bump when adding a migration.
-const minSchemaMigration = 5 // 0000 users, 0001 sessions, 0002 projects, 0003 deployments, 0004 workers
+const minSchemaMigration = 6 // 0006: env_vars + project_databases (M5)
 
 // Config holds the worker's validated environment. Fields are added here as
 // milestones start consuming them (BASE_DOMAIN, UPLOADS_DIR, ... arrive with
@@ -28,6 +30,10 @@ type Config struct {
 	RunPrefetch        int // unacked run jobs allowed at once (light → 4)
 	MinSchemaMigration int
 	ForceTransient     bool // test hook: every build job fails transiently (plan §11 gate)
+	// M5 (plan §8.5):
+	StudentDBURL       string // admin DSN on student-db: provisioning DDL
+	StudentDBContainer string // container to connect to project networks
+	EncryptionKey      []byte // AES-256 key for env values / db passwords
 	// Run role (plan §8, M4):
 	BaseDomain        string // student URL host suffix: <slug>.<BaseDomain>
 	TraefikContainer  string // container to connect to project networks (routing)
@@ -97,6 +103,16 @@ func Load() (Config, error) {
 	if workerConfig.PlatformDBURL = strings.TrimSpace(os.Getenv("PLATFORM_DB_URL")); workerConfig.PlatformDBURL == "" {
 		return Config{}, fmt.Errorf("PLATFORM_DB_URL is not set")
 	}
+	if workerConfig.StudentDBURL = strings.TrimSpace(os.Getenv("STUDENT_DB_URL")); workerConfig.StudentDBURL == "" {
+		return Config{}, fmt.Errorf("STUDENT_DB_URL is not set")
+	}
+	// ENCRYPTION_KEY: same validation as the API's crypto.ts — 64 hex chars.
+	workerConfig.StudentDBContainer = envOr("STUDENT_DB_CONTAINER", "student-db")
+	key, err := crypt.ParseKey(strings.TrimSpace(os.Getenv("ENCRYPTION_KEY")))
+	if err != nil {
+		return Config{}, err
+	}
+	workerConfig.EncryptionKey = key
 
 	// FORCE_TRANSIENT: gate test hook (plan §11 "force a transient error").
 	// Unset/empty is the normal case; a typo must error, not silently disable.
