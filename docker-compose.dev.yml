@@ -1,4 +1,4 @@
-# Development overlay: hot reload for the API (and later the web app).
+# Development overlay: hot reload for the API and the web app.
 # Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 services:
   api:
@@ -11,3 +11,14 @@ services:
       - ./services/api:/app
       - /app/node_modules # keep the image's modules; host has none
       - /app/dist # tsc runs as root in here; don't root-own it on the host
+
+  web:
+    build:
+      context: ./services/web
+      target: dev
+    volumes:
+      - ./services/web:/app
+      - /app/node_modules
+    labels:
+      # vite listens on 5173 in dev (prod caddy listens on 80)
+      - "traefik.http.services.console-web.loadbalancer.server.port=5173"
