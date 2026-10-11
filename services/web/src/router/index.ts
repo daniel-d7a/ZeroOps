@@ -1,21 +1,27 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import { useAuthStore } from '@/stores/auth';
+import { queryClient } from '@/api/queryClient';
+import { fetchMe, type User } from '@/api/auth';
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/', name: 'projects', component: () => import('@/views/ProjectsView.vue'), meta: { requiresAuth: true } },
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue') },
+    { path: '/register', name: 'register', component: () => import('@/views/RegisterView.vue') },
     // SPA fallback also covers unknown paths (Caddy serves index.html).
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 });
 
 router.beforeEach(async (to) => {
-  const auth = useAuthStore();
-  if (!auth.loaded) await auth.fetchMe(); // once per page load; keeps deep links working
-  if (to.meta.requiresAuth && !auth.user) {
+  // Session check through the query cache: first nav fetches, later navs hit
+  // the cache (staleTime in queryClient). 401 -> null = logged out.
+  let me = queryClient.getQueryData<User>(['me']) ?? null;
+  if (me === null && !queryClient.getQueryState(['me'])?.error) {
+    me = await queryClient.query({ queryKey: ['me'], queryFn: fetchMe }).catch(() => null);
+  }
+  if (to.meta.requiresAuth && !me) {
     return { path: '/login', query: { redirect: to.fullPath } };
   }
-  if (to.path === '/login' && auth.user) return '/';
+  if (to.path === '/login' && me) return '/';
 });

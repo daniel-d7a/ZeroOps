@@ -14,7 +14,7 @@ design, this file wins for day-to-day conventions and commands.
 |---|---|
 | Control plane | NestJS (TS, Express) — REST under `/api`, Swagger at `/api/docs` |
 | DB layer | Drizzle ORM + drizzle-kit; `migrate` one-shot service owns all migrations |
-| Frontend | Vue 3 + Vite + TS + Pinia + Vue Router + shadcn-vue + Tailwind + vee-validate, served by Caddy |
+| Frontend | Vue 3 + Vite + TS + Pinia + Vue Router + TanStack Query + shadcn-vue + Tailwind + vee-validate, served by Caddy |
 | Worker | Go — roles `build` and `run`, `WORKER_ROLES` env, scalable replicas |
 | Broker | RabbitMQ 3.x (definitions.json is the source of truth) |
 | Platform DB | Postgres 16 `platform-db` (users, projects, deployments, ...) |
