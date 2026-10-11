@@ -134,4 +134,9 @@ export class ProjectsController {
   get(@Param('id', ParseUUIDPipe) id: string, @Req() req: Request) {
     return this.projects.get(req.session.uid!, id);
   }
+
+  @Get(':id/database')
+  getDatabase(@Param('id', ParseUUIDPipe) id: string, @Req() req: Request) {
+    return this.projects.getDatabase(req.session.uid!, id);
+  }
 }

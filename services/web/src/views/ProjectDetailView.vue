@@ -6,6 +6,9 @@ import { ApiError } from '@/api/client';
 import { getProject } from '@/api/projects';
 import OverviewTab from '@/components/project/OverviewTab.vue';
 import DeploymentsTab from '@/components/project/DeploymentsTab.vue';
+import EnvironmentTab from '@/components/project/EnvironmentTab.vue';
+import FilesTab from '@/components/project/FilesTab.vue';
+import DatabaseTab from '@/components/project/DatabaseTab.vue';
 import Badge from '@/components/ui/Badge.vue';
 import Tabs from '@/components/ui/Tabs.vue';
 import TabsContent from '@/components/ui/TabsContent.vue';
@@ -64,12 +67,24 @@ const statusClass: Record<string, string> = {
         <TabsList class="mb-4">
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="deployments">Deployments</TabsTrigger>
+          <TabsTrigger value="environment">Environment</TabsTrigger>
+          <TabsTrigger value="files">Files</TabsTrigger>
+          <TabsTrigger value="database">Database</TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
           <OverviewTab :project="project.data.value" />
         </TabsContent>
         <TabsContent value="deployments">
           <DeploymentsTab :project-id="id" />
+        </TabsContent>
+        <TabsContent value="environment">
+          <EnvironmentTab :project="project.data.value" />
+        </TabsContent>
+        <TabsContent value="files">
+          <FilesTab :project="project.data.value" />
+        </TabsContent>
+        <TabsContent value="database">
+          <DatabaseTab :project="project.data.value" />
         </TabsContent>
       </Tabs>
     </template>
