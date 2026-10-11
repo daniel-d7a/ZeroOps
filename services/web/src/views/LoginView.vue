@@ -1,104 +1,62 @@
 <script setup lang="ts">
 import { ref } from 'vue';
+import { useField, useForm } from 'vee-validate';
+import { toTypedSchema } from '@vee-validate/zod';
+import * as z from 'zod';
 import { useRoute, useRouter } from 'vue-router';
 import { ApiError } from '@/api/client';
 import { useAuthStore } from '@/stores/auth';
+import Button from '@/components/ui/Button.vue';
+import Card from '@/components/ui/Card.vue';
+import Input from '@/components/ui/Input.vue';
+import Label from '@/components/ui/Label.vue';
 
 const auth = useAuthStore();
 const route = useRoute();
 const router = useRouter();
-
-const email = ref('');
-const password = ref('');
 const error = ref('');
-const busy = ref(false);
 
-async function submit() {
+// vee-validate + zod: one schema is the validation AND the form types.
+const schema = toTypedSchema(
+  z.object({
+    email: z.string().min(1, 'Email is required').email('Enter a valid email'),
+    password: z.string().min(1, 'Password is required'),
+  }),
+);
+const { handleSubmit, errors, isSubmitting } = useForm({ validationSchema: schema });
+const email = useField<string>('email');
+const password = useField<string>('password');
+
+const submit = handleSubmit(async (values) => {
   error.value = '';
-  busy.value = true;
   try {
-    await auth.login(email.value, password.value);
+    await auth.login(values.email, values.password);
     const redirect = typeof route.query.redirect === 'string' ? route.query.redirect : '/';
     await router.replace(redirect);
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : 'login failed';
-  } finally {
-    busy.value = false;
   }
-}
+});
 </script>
 
 <template>
-  <main class="page">
-    <form class="card" @submit.prevent="submit">
-      <h1>Sign in</h1>
-      <label>
-        Email
-        <input v-model="email" type="email" name="email" autocomplete="email" required />
-      </label>
-      <label>
-        Password
-        <input v-model="password" type="password" name="password" autocomplete="current-password" required />
-      </label>
-      <p v-if="error" class="error" role="alert">{{ error }}</p>
-      <button type="submit" :disabled="busy">{{ busy ? 'Signing in…' : 'Sign in' }}</button>
-    </form>
+  <main class="mx-auto mt-24 w-full max-w-sm px-4">
+    <Card class="p-6">
+      <h1 class="mb-4 text-lg font-semibold">Sign in</h1>
+      <form class="flex flex-col gap-4" novalidate @submit="submit">
+        <div class="flex flex-col gap-2">
+          <Label for="email">Email</Label>
+          <Input id="email" type="email" autocomplete="email" placeholder="you@example.com" v-bind="email" />
+          <p v-if="errors.email" class="text-sm text-destructive">{{ errors.email }}</p>
+        </div>
+        <div class="flex flex-col gap-2">
+          <Label for="password">Password</Label>
+          <Input id="password" type="password" autocomplete="current-password" v-bind="password" />
+          <p v-if="errors.password" class="text-sm text-destructive">{{ errors.password }}</p>
+        </div>
+        <p v-if="error" class="text-sm text-destructive" role="alert">{{ error }}</p>
+        <Button type="submit" :disabled="isSubmitting">{{ isSubmitting ? 'Signing in…' : 'Sign in' }}</Button>
+      </form>
+    </Card>
   </main>
 </template>
-
-<style>
-body {
-  margin: 0;
-  font-family: ui-sans-serif, system-ui, sans-serif;
-  background: #fafafa;
-  color: #111;
-}
-.page {
-  max-width: 24rem;
-  margin: 14vh auto 0;
-  padding: 0 1.5rem;
-}
-.card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.9rem;
-  background: #fff;
-  border: 1px solid #e5e5e5;
-  border-radius: 10px;
-  padding: 1.5rem;
-}
-h1 {
-  margin: 0;
-  font-size: 1.3rem;
-}
-label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  font-size: 0.85rem;
-  color: #444;
-}
-input {
-  padding: 0.5rem 0.6rem;
-  border: 1px solid #ccc;
-  border-radius: 6px;
-  font-size: 0.95rem;
-}
-button {
-  padding: 0.55rem;
-  border: 0;
-  border-radius: 6px;
-  background: #111;
-  color: #fff;
-  font-size: 0.95rem;
-  cursor: pointer;
-}
-button:disabled {
-  opacity: 0.5;
-}
-.error {
-  margin: 0;
-  color: #b00020;
-  font-size: 0.85rem;
-}
-</style>
