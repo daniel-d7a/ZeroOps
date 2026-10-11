@@ -7,24 +7,12 @@ import { toTypedSchema } from '@vee-validate/zod';
 import * as z from 'zod';
 import { api, ApiError } from '@/api/client';
 import { fetchMe } from '@/api/auth';
+import type { Project } from '@/api/projects';
 import Badge from '@/components/ui/Badge.vue';
 import Button from '@/components/ui/Button.vue';
 import Card from '@/components/ui/Card.vue';
 import Input from '@/components/ui/Input.vue';
 import Label from '@/components/ui/Label.vue';
-
-interface Project {
-  id: string;
-  name: string;
-  slug: string;
-  type: string;
-  wantsDb: boolean;
-  desiredState: string;
-  status: string;
-  currentDeploymentId: string | null;
-  createdAt: string;
-  url: string;
-}
 
 const router = useRouter();
 const queryClient = useQueryClient();
@@ -136,7 +124,7 @@ function badgeClass(status: string) {
     <ul v-else class="flex flex-col gap-3">
       <li v-for="p in projects.data.value?.items" :key="p.id">
         <Card class="flex items-center gap-3 p-4">
-          <span class="font-medium">{{ p.name }}</span>
+          <RouterLink class="font-medium hover:underline" :to="`/projects/${p.id}`">{{ p.name }}</RouterLink>
           <Badge :class="badgeClass(p.status)">{{ p.status }}</Badge>
           <span v-if="p.wantsDb" class="text-xs text-muted-foreground">db</span>
           <span class="flex-1" />

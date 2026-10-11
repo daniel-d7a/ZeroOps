@@ -18,17 +18,23 @@ export function setCsrfToken(token: string | null): void {
   csrfToken = token;
 }
 
-export async function api<T>(path: string, init: { json?: unknown; method?: string } = {}): Promise<T> {
+export async function api<T>(
+  path: string,
+  init: { json?: unknown; formData?: FormData; method?: string } = {},
+): Promise<T> {
   const headers = new Headers();
-  let body: string | undefined;
-  if (init.json !== undefined) {
+  let body: BodyInit | undefined;
+  if (init.formData) {
+    // multipart — browser sets the boundary itself
+    body = init.formData;
+  } else if (init.json !== undefined) {
     headers.set('content-type', 'application/json');
     body = JSON.stringify(init.json);
   }
   if (csrfToken) headers.set('x-csrf-token', csrfToken);
 
   const res = await fetch(`/api${path}`, {
-    method: init.method ?? (init.json !== undefined ? 'POST' : 'GET'),
+    method: init.method ?? (init.json !== undefined || init.formData !== undefined ? 'POST' : 'GET'),
     headers,
     body,
     credentials: 'include',

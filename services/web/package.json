@@ -21,6 +21,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "pinia": "^4.0.3",
+    "reka-ui": "^2.11.0",
     "tailwind-merge": "^3.7.0",
     "tailwindcss": "^4.3.3",
     "vee-validate": "^4.15.1",
