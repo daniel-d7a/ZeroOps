@@ -3,18 +3,13 @@ import { and, desc, eq, sql } from 'drizzle-orm';
 import { DRIZZLE, Db } from '../db/db.module';
 import { publicProjectColumns, projectDatabases, projects } from '../db/schema';
 import { PageQueryDto } from '../common/page-query.dto';
+import { liveUrl } from '../common/live-url';
 import { CreateProjectDto } from './dto/create-project.dto';
 import { isReservedSlug, isValidSlug, slugify } from './slug';
 
 @Injectable()
 export class ProjectsService {
   constructor(@Inject(DRIZZLE) private readonly db: Db) {}
-
-  private liveUrl(slug: string): string {
-    const domain = process.env.BASE_DOMAIN ?? 'localhost';
-    const port = process.env.PUBLIC_PORT ? `:${process.env.PUBLIC_PORT}` : '';
-    return `http://${slug}.${domain}${port}`;
-  }
 
   async create(userId: string, dto: CreateProjectDto) {
     const slug = dto.slug ?? slugify(dto.name);
@@ -35,7 +30,7 @@ export class ProjectsService {
       .onConflictDoNothing({ target: projects.slug })
       .returning(publicProjectColumns);
     if (!row) throw new ConflictException('slug already in use');
-    return { ...row, url: this.liveUrl(row.slug) };
+    return { ...row, url: liveUrl(row.slug) };
   }
 
   async list(userId: string, query: PageQueryDto) {
@@ -52,7 +47,7 @@ export class ProjectsService {
         .offset(offset),
       this.db.select({ count: sql<number>`count(*)` }).from(projects).where(owned),
     ]);
-    return { items: items.map((p) => ({ ...p, url: this.liveUrl(p.slug) })), total: Number(count) };
+    return { items: items.map((p) => ({ ...p, url: liveUrl(p.slug) })), total: Number(count) };
   }
 
   async get(userId: string, id: string) {
@@ -63,7 +58,7 @@ export class ProjectsService {
       .limit(1);
     // 404 (not 403) for other users' projects: they must not learn it exists (AGENTS)
     if (!row) throw new NotFoundException('project not found');
-    return { ...row, url: this.liveUrl(row.slug) };
+    return { ...row, url: liveUrl(row.slug) };
   }
 
   /**

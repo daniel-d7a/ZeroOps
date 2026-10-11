@@ -9,6 +9,7 @@ export const router = createRouter({
     { path: '/projects/:id', name: 'project', component: () => import('@/views/ProjectDetailView.vue'), meta: { requiresAuth: true } },
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue') },
     { path: '/register', name: 'register', component: () => import('@/views/RegisterView.vue') },
+    { path: '/admin', name: 'admin', component: () => import('@/views/AdminView.vue'), meta: { requiresAuth: true, requiresAdmin: true } },
     // SPA fallback also covers unknown paths (Caddy serves index.html).
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
@@ -24,5 +25,8 @@ router.beforeEach(async (to) => {
   if (to.meta.requiresAuth && !me) {
     return { path: '/login', query: { redirect: to.fullPath } };
   }
+  // Client-side role gate (plan §M6.6); the API's RolesGuard is the real
+  // enforcement — this just avoids rendering a page that would 403.
+  if (to.meta.requiresAdmin && me?.role !== 'admin') return '/';
   if (to.path === '/login' && me) return '/';
 });

@@ -24,6 +24,11 @@ export class AdminController {
     return this.admin.listUsers(query);
   }
 
+  @Get('system')
+  system() {
+    return this.admin.system();
+  }
+
   @Get('projects')
   listProjects(@Query() query: PageQueryDto) {
     return this.admin.listProjects(query);

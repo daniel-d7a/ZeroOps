@@ -83,6 +83,9 @@ function badgeClass(status: string) {
       <h1 class="text-xl font-semibold">Projects</h1>
       <span class="flex-1" />
       <span class="text-sm text-muted-foreground">{{ me.data.value?.email }}</span>
+      <RouterLink v-if="me.data.value?.role === 'admin'" to="/admin">
+        <Button variant="ghost" size="sm">Admin</Button>
+      </RouterLink>
       <Button variant="outline" size="sm" @click="logout">Sign out</Button>
     </header>
 

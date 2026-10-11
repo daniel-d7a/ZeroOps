@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import { TabsRoot } from 'reka-ui';
 
-// Vendored shadcn-vue Tabs root (new-york) — uncontrolled by default
-// (active tab is view-local state, not a URL).
-defineProps<{ defaultValue?: string; class?: string }>();
+// Vendored shadcn-vue Tabs root (new-york). Uncontrolled via defaultValue,
+// or controlled with v-model when the active tab should live in the URL.
+defineProps<{ defaultValue?: string; modelValue?: string; class?: string }>();
+const emit = defineEmits<{ 'update:modelValue': [value: string] }>();
 </script>
 
 <template>
-  <TabsRoot :default-value="defaultValue" :class="class">
+  <TabsRoot
+    :default-value="defaultValue"
+    :model-value="modelValue"
+    :class="class"
+    @update:model-value="emit('update:modelValue', $event)"
+  >
     <slot />
   </TabsRoot>
 </template>
