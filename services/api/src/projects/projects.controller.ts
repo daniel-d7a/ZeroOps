@@ -10,6 +10,7 @@ import { PageQueryDto } from '../common/page-query.dto';
 import { SessionGuard } from '../auth/session.guard';
 import { ActionsService } from './actions.service';
 import { CreateProjectDto } from './dto/create-project.dto';
+import { PutEnvBulkDto } from './dto/put-env-bulk.dto';
 import { PutEnvDto } from './dto/put-env.dto';
 import { RedeployDto } from './dto/redeploy.dto';
 import { DeploymentsService, MAX_UPLOAD_BYTES } from './deployments.service';
@@ -122,6 +123,13 @@ export class ProjectsController {
     @Req() req: Request,
   ) {
     return this.env.put(id, req.session.uid!, key, dto.value);
+  }
+
+  /** One-shot bulk apply for the `.env` editor — atomic, plan §M6.5. */
+  @Put(':id/env')
+  @ApiHeader({ name: 'X-CSRF-Token', required: true, description: 'csrfToken from login or /auth/me' })
+  putEnvBulk(@Param('id', ParseUUIDPipe) id: string, @Body() dto: PutEnvBulkDto, @Req() req: Request) {
+    return this.env.bulk(id, req.session.uid!, dto.set, dto.remove);
   }
 
   @Delete(':id/env/:key')

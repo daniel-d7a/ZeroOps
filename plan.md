@@ -363,7 +363,7 @@ Vue 3 with Vite, TypeScript, Pinia and Vue Router. The API client uses `credenti
 - **Project detail** with tabs:
   - *Overview:* status, URL, buttons for Stop, Start, Restart and Redeploy (disabled when not applicable, with confirmation for Stop and Redeploy), and an upload dialog (drag and drop zip with progress).
   - *Deployments:* history with status, source and time. Opening one shows the log viewer.
-  - *Environment:* add, edit and delete variables. Show a "restart required" banner after changes, with a Restart button.
+  - *Environment:* add, edit and delete variables, **plus a bulk editor that accepts regular `.env` file syntax** (`KEY=value` lines, `#` comments, optional `export ` prefix, optional quotes around values) so users can paste a whole `.env` and apply it in one go — parsed and validated client-side against the same rules as single adds, then applied as a diff **atomically through one bulk endpoint** (`PUT /projects/:id/env` with `set` + `remove`: validated up-front, quota checked against the final state, written in a single transaction — the per-key `PUT`/`DELETE` remain for single edits; invalid lines are listed with their line numbers and block the apply until fixed; variables containing line breaks cannot round-trip `.env` syntax and are shown separately, never deleted by a bulk apply). Show a "restart required" banner after changes, with a Restart button.
   - *Database:* shows whether one is provisioned (name and status). The connection string is injected automatically as `DATABASE_URL`.
   - *Files:* saved sources with size and date, and a Redeploy-from-this-zip action.
 - Clear, friendly error messages for the common failures (build failed, health check failed, image missing, quota reached).

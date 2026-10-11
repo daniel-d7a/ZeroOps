@@ -1,5 +1,5 @@
 import { BadRequestException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import { and, asc, eq, ne, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, ne, sql } from 'drizzle-orm';
 import { DRIZZLE, Db } from '../db/db.module';
 import { envVars, projects } from '../db/schema';
 import { decrypt, encrypt } from '../common/crypto';
@@ -79,5 +79,61 @@ export class EnvService {
       .where(and(eq(envVars.projectId, projectId), eq(envVars.key, key)))
       .returning({ id: envVars.id });
     if (deleted.length === 0) throw new NotFoundException('env var not found');
+  }
+
+  /**
+   * Bulk apply (plan §M6.5): the `.env` editor's diff lands in ONE request.
+   * Everything is validated up-front (400 names the offending key, nothing
+   * written), quota is checked against the FINAL state, and the writes run in
+   * a single transaction — all-or-nothing, no partial-apply recovery.
+   * A key present in both maps is saved, not deleted (the pasted file wins).
+   */
+  async bulk(projectId: string, userId: string, set: Record<string, string> | undefined, remove: string[] | undefined) {
+    await this.assertOwned(projectId, userId);
+
+    const sets = Object.entries(set ?? {});
+    for (const [key, value] of sets) {
+      if (typeof value !== 'string') throw new BadRequestException(`set.${key}: value must be a string`);
+      try {
+        this.validate(key, value);
+      } catch (e) {
+        throw new BadRequestException(`set.${key}: ${(e as Error).message}`);
+      }
+    }
+    const dels = [...new Set(remove ?? [])].filter((k) => !(k in (set ?? {})));
+
+    const existingRows = await this.db
+      .select({ key: envVars.key })
+      .from(envVars)
+      .where(eq(envVars.projectId, projectId));
+    const existing = new Set(existingRows.map((r) => r.key));
+    const newKeys = sets.filter(([k]) => !existing.has(k)).length;
+    const removedExisting = dels.filter((k) => existing.has(k)).length;
+    // existingRows is the full set (quota caps it at 50) — no count(*) needed.
+    if (existingRows.length - removedExisting + newKeys > MAX_VARS) {
+      throw new ForbiddenException('env var quota reached (50 per project)');
+    }
+
+    const deleted = await this.db.transaction(async (tx) => {
+      if (sets.length > 0) {
+        // One multi-row upsert instead of a query per key; excluded.* refers
+        // to the proposed row, so updates overwrite in the same statement.
+        await tx
+          .insert(envVars)
+          .values(sets.map(([key, value]) => ({ projectId, key, valueEncrypted: encrypt(value) })))
+          .onConflictDoUpdate({
+            target: [envVars.projectId, envVars.key],
+            set: { valueEncrypted: sql`excluded.value_encrypted`, updatedAt: new Date() },
+          });
+      }
+      if (dels.length === 0) return 0;
+      const rows = await tx
+        .delete(envVars)
+        .where(and(eq(envVars.projectId, projectId), inArray(envVars.key, dels)))
+        .returning({ id: envVars.id });
+      return rows.length;
+    });
+
+    return { saved: sets.length, deleted };
   }
 }

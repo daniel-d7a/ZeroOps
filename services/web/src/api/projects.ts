@@ -54,6 +54,15 @@ export function deleteEnv(projectId: string, key: string): Promise<void> {
   return api(`/projects/${projectId}/env/${encodeURIComponent(key)}`, { method: 'DELETE' });
 }
 
+/** One-shot atomic bulk apply — server validates all keys, checks quota
+ *  against the final state and writes everything in one transaction. */
+export function putEnvBulk(
+  projectId: string,
+  input: { set?: Record<string, string>; remove?: string[] },
+): Promise<{ saved: number; deleted: number }> {
+  return api(`/projects/${projectId}/env`, { method: 'PUT', json: input });
+}
+
 // --- saved sources (M6.5) --------------------------------------------------
 
 export interface Source {
