@@ -183,6 +183,14 @@ func ReadAttempt(delivery amqp091.Delivery) int64 {
 	}
 }
 
+// retryDecision is the pure half of RetryOrGiveUp (plan §6), split out so the
+// §11 "retry decision" unit test needs no broker: deliveries 0,1,2 retry with
+// nextAttempt+1; the third delivery (nextAttempt == MaxAttempts) gives up.
+func retryDecision(delivery amqp091.Delivery) (gaveUp bool, nextAttempt int64) {
+	nextAttempt = ReadAttempt(delivery) + 1
+	return nextAttempt >= MaxAttempts, nextAttempt
+}
+
 // RetryOrGiveUp applies the plan §6 transient rule: either hand the message
 // to the retry exchange (TTL 30 s → dead-letters back to the main exchange,
 // so it later redelivers with attempt+1) or — once MaxAttempts is reached —
@@ -193,8 +201,8 @@ func ReadAttempt(delivery amqp091.Delivery) int64 {
 // is the product state). Both paths confirm before returning so a nil error
 // means the broker durably has the message.
 func (c *Conn) RetryOrGiveUp(ctx context.Context, domain string, delivery amqp091.Delivery, cause string) (gaveUp bool, err error) {
-	nextAttempt := ReadAttempt(delivery) + 1
-	if nextAttempt >= MaxAttempts {
+	gaveUp, nextAttempt := retryDecision(delivery)
+	if gaveUp {
 		return true, c.PublishDead(ctx, domain, delivery, cause)
 	}
 	return false, c.PublishRetry(ctx, domain, delivery, nextAttempt)

@@ -98,7 +98,13 @@ function badgeClass(status: string) {
       <form class="flex flex-col gap-4" novalidate @submit="submitCreate">
         <div class="flex flex-col gap-2">
           <Label for="name">Name</Label>
-          <Input id="name" placeholder="My First App" v-bind="name" />
+          <Input
+            id="name"
+            placeholder="My First App"
+            :value="name.value.value"
+            @input="name.handleChange"
+            @blur="name.handleBlur"
+          />
           <p v-if="errors.name" class="text-sm text-destructive">{{ errors.name }}</p>
         </div>
         <label class="flex items-center gap-2 text-sm">

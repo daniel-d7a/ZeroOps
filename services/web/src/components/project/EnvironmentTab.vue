@@ -234,13 +234,21 @@ function applyBulk() {
             placeholder="GREETING"
             class="font-mono"
             :disabled="editing !== null"
-            v-bind="key"
+            :value="key.value.value"
+            @input="key.handleChange"
+            @blur="key.handleBlur"
           />
           <p v-if="errors.key" class="text-sm text-destructive">{{ errors.key }}</p>
         </div>
         <div class="flex flex-col gap-2">
           <Label for="env-value">Value</Label>
-          <Input id="env-value" placeholder="hello world" v-bind="value" />
+          <Input
+            id="env-value"
+            placeholder="hello world"
+            :value="value.value.value"
+            @input="value.handleChange"
+            @blur="value.handleBlur"
+          />
           <p v-if="errors.value" class="text-sm text-destructive">{{ errors.value }}</p>
         </div>
         <p v-if="formError" class="text-sm text-destructive" role="alert">{{ formError }}</p>

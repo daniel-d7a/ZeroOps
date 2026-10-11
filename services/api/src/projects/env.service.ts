@@ -30,6 +30,7 @@ export class EnvService {
       throw new BadRequestException('key must match ^[A-Z_][A-Z0-9_]*$ (max 128 chars)');
     }
     if (RESERVED_KEYS.has(key)) throw new BadRequestException(`${key} is reserved and cannot be set`);
+    if (value.length === 0) throw new BadRequestException('value must not be empty');
     if (Buffer.byteLength(value, 'utf8') > MAX_VALUE_BYTES) {
       throw new BadRequestException('value exceeds 4 KB');
     }

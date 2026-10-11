@@ -11,7 +11,8 @@ export const isReservedSlug = (slug: string): boolean => RESERVED_SLUGS.has(slug
 export function slugify(name: string): string {
   return name
     .toLowerCase()
-    .normalize('NFKD') // decompose accents: e + combining mark; mark stripped below
+    .normalize('NFKD') // decompose accents: e + combining mark
+    .replace(/\p{M}+/gu, '') // strip the marks the decomposition exposed
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 63)

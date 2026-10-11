@@ -57,12 +57,27 @@ const submit = handleSubmit((values) => {
       <form class="flex flex-col gap-4" novalidate @submit="submit">
         <div class="flex flex-col gap-2">
           <Label for="email">Email</Label>
-          <Input id="email" type="email" autocomplete="email" placeholder="you@example.com" v-bind="email" />
+          <Input
+            id="email"
+            type="email"
+            autocomplete="email"
+            placeholder="you@example.com"
+            :value="email.value.value"
+            @input="email.handleChange"
+            @blur="email.handleBlur"
+          />
           <p v-if="errors.email" class="text-sm text-destructive">{{ errors.email }}</p>
         </div>
         <div class="flex flex-col gap-2">
           <Label for="password">Password</Label>
-          <Input id="password" type="password" autocomplete="current-password" v-bind="password" />
+          <Input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            :value="password.value.value"
+            @input="password.handleChange"
+            @blur="password.handleBlur"
+          />
           <p v-if="errors.password" class="text-sm text-destructive">{{ errors.password }}</p>
         </div>
         <p v-if="error" class="text-sm text-destructive" role="alert">{{ error }}</p>
