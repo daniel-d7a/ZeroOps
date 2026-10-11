@@ -130,6 +130,9 @@ function badgeClass(status: string) {
           <RouterLink class="font-medium hover:underline" :to="`/projects/${p.id}`">{{ p.name }}</RouterLink>
           <Badge :class="badgeClass(p.status)">{{ p.status }}</Badge>
           <span v-if="p.wantsDb" class="text-xs text-muted-foreground">db</span>
+          <span v-if="p.lastDeployAt" class="text-xs text-muted-foreground" title="Last deploy">
+            deployed {{ new Date(p.lastDeployAt).toLocaleDateString() }}
+          </span>
           <span class="flex-1" />
           <a :href="p.url" class="text-sm text-muted-foreground underline" target="_blank" rel="noreferrer">
             {{ p.url }}

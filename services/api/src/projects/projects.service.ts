@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { and, desc, eq, sql } from 'drizzle-orm';
 import { DRIZZLE, Db } from '../db/db.module';
-import { publicProjectColumns, projectDatabases, projects } from '../db/schema';
+import { deployments, publicProjectColumns, projectDatabases, projects } from '../db/schema';
 import { PageQueryDto } from '../common/page-query.dto';
 import { liveUrl } from '../common/live-url';
 import { CreateProjectDto } from './dto/create-project.dto';
@@ -39,8 +39,11 @@ export class ProjectsService {
     const owned = eq(projects.userId, userId);
     const [items, [{ count }]] = await Promise.all([
       this.db
-        .select(publicProjectColumns)
+        // lastDeployAt = creation time of the current (live-ish) deployment —
+        // plan §9 wants "last deploy time" on the projects list.
+        .select({ ...publicProjectColumns, lastDeployAt: deployments.createdAt })
         .from(projects)
+        .leftJoin(deployments, eq(deployments.id, projects.currentDeploymentId))
         .where(owned)
         .orderBy(desc(projects.createdAt))
         .limit(limit)

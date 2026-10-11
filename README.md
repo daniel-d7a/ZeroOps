@@ -8,11 +8,12 @@ Spec: `plan.md`. Agent operating manual: `AGENTS.md`.
 
 ## Status
 
-Milestone **M5 (database and env vars)** done — projects can get a role-isolated
-Postgres database (provisioned once per project, `DATABASE_URL` injected at
-container create), and user env vars are stored encrypted (AES-256-GCM),
-rejected for reserved keys, and applied on restart. Next:
-**M6 (Vue frontend)**. See `AGENTS.md`.
+Milestone **M6 (Vue frontend)** done — the console covers everything in plan §9:
+auth, projects list (status, URL, last deploy), project detail with tabs
+(overview actions + drag-and-drop upload with progress, deployment history with
+source filenames + log viewer, `.env`-style environment editor with atomic bulk
+apply, saved files, database status) and the role-gated admin pages (users,
+projects, system). Next: **M7 (hardening and tests)**. See `AGENTS.md`.
 
 ## Requirements
 

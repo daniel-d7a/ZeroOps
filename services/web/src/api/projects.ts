@@ -1,4 +1,4 @@
-import { api, ApiError } from '@/api/client';
+import { api, ApiError, getCsrfToken } from '@/api/client';
 
 export interface Project {
   id: string;
@@ -11,6 +11,8 @@ export interface Project {
   currentDeploymentId: string | null;
   createdAt: string;
   url: string;
+  /** list endpoint only: createdAt of the current deployment */
+  lastDeployAt?: string | null;
 }
 
 export function getProject(id: string): Promise<Project> {
@@ -23,10 +25,43 @@ export function projectAction(id: string, type: ActionType): Promise<unknown> {
   return api(`/projects/${id}/${type}`, { json: {} });
 }
 
-export function uploadDeployment(id: string, file: File): Promise<unknown> {
-  const form = new FormData();
-  form.append('file', file);
-  return api(`/projects/${id}/deployments`, { formData: form });
+/** Multipart upload via XHR — fetch cannot report upload progress (plan §9
+ *  wants a drag-and-drop dialog with progress). CSRF rides the same header. */
+export function uploadDeployment(
+  id: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/projects/${id}/deployments`);
+    xhr.withCredentials = true;
+    const token = getCsrfToken();
+    if (token) xhr.setRequestHeader('x-csrf-token', token);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress?.(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(xhr.responseText ? (JSON.parse(xhr.responseText) as unknown) : undefined);
+        return;
+      }
+      let message = xhr.statusText || 'upload failed';
+      try {
+        const payload = JSON.parse(xhr.responseText) as { message?: string | string[] };
+        if (payload.message) {
+          message = Array.isArray(payload.message) ? payload.message.join(', ') : payload.message;
+        }
+      } catch {
+        // non-JSON error body — keep statusText
+      }
+      reject(new ApiError(xhr.status, message));
+    };
+    xhr.onerror = () => reject(new ApiError(0, 'upload failed — network error'));
+    const form = new FormData();
+    form.append('file', file);
+    xhr.send(form);
+  });
 }
 
 /** Statuses worth polling — plan §8: the worker transitions them asynchronously. */

@@ -14,7 +14,7 @@ design, this file wins for day-to-day conventions and commands.
 |---|---|
 | Control plane | NestJS (TS, Express) — REST under `/api`, Swagger at `/api/docs` |
 | DB layer | Drizzle ORM + drizzle-kit; `migrate` one-shot service owns all migrations |
-| Frontend | Vue 3 + Vite + TS + Pinia + Vue Router + TanStack Query + shadcn-vue + Tailwind + vee-validate, served by Caddy |
+| Frontend | Vue 3 + Vite + TS + Pinia + Vue Router + TanStack Query + shadcn-vue (vendored, reka-ui primitives) + Tailwind + vee-validate, served by Caddy |
 | Worker | Go — roles `build` and `run`, `WORKER_ROLES` env, scalable replicas |
 | Broker | RabbitMQ 3.x (definitions.json is the source of truth) |
 | Platform DB | Postgres 16 `platform-db` (users, projects, deployments, ...) |
@@ -107,7 +107,7 @@ handling.
 - [x] **M4** Real run — networks, container limits, health check, Traefik routing,
       stop/start/restart/redeploy
 - [x] **M5** Database and env vars
-- [ ] **M6** Vue frontend (user + admin)
+- [x] **M6** Vue frontend (user + admin)
 - [ ] **M7** Hardening and tests (plan §10 + §11), README complete
 
 Update the checkbox when a milestone gate passes.

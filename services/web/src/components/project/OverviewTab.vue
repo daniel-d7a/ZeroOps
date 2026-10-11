@@ -33,12 +33,23 @@ const runAction = useMutation({
 });
 
 const upload = useMutation({
-  mutationFn: (file: File) => uploadDeployment(props.project.id, file),
+  mutationFn: (file: File) =>
+    uploadDeployment(props.project.id, file, (pct) => {
+      uploadPct.value = pct;
+    }),
   onSuccess: refresh,
+  onSettled: () => {
+    uploadPct.value = null;
+  },
   onError: (e) => {
     actionError.value = e instanceof ApiError ? e.message : 'upload failed';
   },
 });
+
+// Drag-and-drop upload with progress (plan §9) — XHR because fetch has no
+// upload-progress events.
+const uploadPct = ref<number | null>(null);
+const dragOver = ref(false);
 
 // Confirmations on Stop/Redeploy only (M6.3) — shadcn AlertDialog, not
 // window.confirm: focus trap + Esc + accessible description for free.
@@ -72,13 +83,26 @@ function confirmAction() {
   if (type) runAction.mutate(type);
 }
 
+function startUpload(file: File | undefined) {
+  if (!file) return;
+  actionError.value = '';
+  if (!file.name.toLowerCase().endsWith('.zip')) {
+    actionError.value = 'only .zip archives can be deployed';
+    return;
+  }
+  upload.mutate(file);
+}
+
 function onFilePick(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   input.value = ''; // allow re-picking the same file after a failure
-  if (!file) return;
-  actionError.value = '';
-  upload.mutate(file);
+  startUpload(file);
+}
+
+function onDrop(event: DragEvent) {
+  dragOver.value = false;
+  startUpload(event.dataTransfer?.files?.[0]);
 }
 
 const busy = computed(() => isTransientStatus(props.project.status));
@@ -115,20 +139,28 @@ const busy = computed(() => isTransientStatus(props.project.status));
         >
           Redeploy
         </Button>
+      </div>
 
-        <span class="w-4" />
-        <label
-          class="inline-flex h-9 cursor-pointer items-center rounded-md border border-input bg-background px-4 text-sm font-medium shadow-sm hover:bg-accent"
-        >
-          {{ upload.isPending.value ? 'Uploading…' : 'Upload zip' }}
-          <input
-            type="file"
-            accept=".zip"
-            class="hidden"
-            :disabled="busy || upload.isPending.value"
-            @change="onFilePick"
-          />
-        </label>
+      <div
+        class="mt-3 flex flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed px-4 py-6 text-sm transition-colors"
+        :class="dragOver ? 'border-foreground bg-accent' : 'border-border'"
+        @dragover.prevent="dragOver = true"
+        @dragleave.prevent="dragOver = false"
+        @drop.prevent="onDrop"
+      >
+        <template v-if="upload.isPending.value">
+          <span class="text-muted-foreground">Uploading… {{ uploadPct ?? 0 }}%</span>
+          <div class="mt-1 h-1.5 w-48 overflow-hidden rounded-full bg-secondary">
+            <div class="h-full bg-primary transition-all" :style="{ width: `${uploadPct ?? 0}%` }" />
+          </div>
+        </template>
+        <template v-else>
+          <span class="text-muted-foreground">Drag a zip here</span>
+          <label class="cursor-pointer underline">
+            or browse…
+            <input type="file" accept=".zip" class="hidden" :disabled="busy" @change="onFilePick" />
+          </label>
+        </template>
       </div>
 
       <p v-if="actionError" class="mt-3 text-sm text-destructive" role="alert">{{ actionError }}</p>

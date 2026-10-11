@@ -232,8 +232,10 @@ export class DeploymentsService {
     const offset = query.offset ?? 0;
     const [items, [{ count }]] = await Promise.all([
       this.db
-        .select(publicDeploymentColumns)
+        // source filename for the history list (plan §9: "status, source, time")
+        .select({ ...publicDeploymentColumns, originalFilename: sources.originalFilename })
         .from(deployments)
+        .innerJoin(sources, eq(sources.id, deployments.sourceId))
         .where(eq(deployments.projectId, projectId))
         .orderBy(desc(deployments.createdAt))
         .limit(limit)

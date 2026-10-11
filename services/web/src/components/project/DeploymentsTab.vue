@@ -14,6 +14,7 @@ interface Deployment {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  originalFilename: string | null; // source zip name (plan §9 history)
 }
 
 interface LogLine {
@@ -124,6 +125,9 @@ const statusClass: Record<string, string> = {
             <span class="flex items-center gap-2">
               <Badge :class="statusClass[d.status] ?? ''">{{ d.status }}</Badge>
               <span class="text-xs text-muted-foreground">{{ d.kind }}</span>
+              <span v-if="d.originalFilename" class="truncate text-xs text-muted-foreground">
+                {{ d.originalFilename }}
+              </span>
               <span class="flex-1" />
               <span class="text-xs text-muted-foreground">
                 {{ new Date(d.createdAt).toLocaleTimeString() }}
