@@ -147,7 +147,18 @@ func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Deliv
 		return handler.transient(ctx, delivery, job.DeploymentID, "", logger, err)
 	}
 	if !claimed {
-		// Duplicate or a sibling replica owns it — both are fine: ack, no work.
+		if currentStatus == "starting" {
+			// Same busy-bounce as the build role: the previous owner died
+			// moments ago (heartbeat_at fresh), so steal the claim only once
+			// the 2 min staleness window has passed. Same attempt — this is
+			// a wait, not a retry.
+			logger.Info("deploy claim held elsewhere, bouncing for steal window")
+			if err := handler.Broker.PublishRetry(ctx, "run", delivery, queue.ReadAttempt(delivery)); err != nil {
+				return err // infrastructure: crash; the unacked message requeues
+			}
+			return nil
+		}
+		// Duplicate or a sibling replica owns it — fine: ack, no work.
 		logger.Info("deploy skipped", "status", currentStatus)
 		return nil
 	}

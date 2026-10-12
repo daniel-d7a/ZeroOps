@@ -42,15 +42,42 @@ Development with hot reload:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
 ```
 
-## Docker address pool (required before many projects)
+## Known issue: Docker address pool fills up
 
-Docker only creates ~30 user-defined networks by default; every project gets one.
-Add to `/etc/docker/daemon.json` (see `daemon.json.example`) and restart Docker:
+**Every project creates one Docker network (`net-<projectId>`), and the MVP has
+no project teardown — networks accumulate forever.** Docker's default pool only
+allows ~30 user-defined networks, so past ~25-30 projects every new deploy
+fails with:
+
+```
+all predefined address pools have been fully subnetted
+```
+
+Existing projects keep running; only *new* network creation (new deploys) is
+blocked. The failure appears in the deployment's error/logs after ~60s
+(3 retries).
+
+Check the pool any time (safe on production hosts):
 
 ```sh
-sudo systemctl restart docker
+bash scripts/network-status.sh   # counts, capacity, and a live allocation probe
 ```
+
+Fix once, ideally **before the first deploy** (gives ~4000 projects):
+
+```sh
+sudo cp daemon.json.example /etc/docker/daemon.json
+sudo systemctl restart docker && docker compose up -d
+```
+
+Do **not** free space by deleting `net-*` networks: a running project's network
+is in use (deleting it takes the project down), and a stopped project needs its
+network for the next `start`. Only enlarge the pool — or implement project
+teardown (plan §14 backlog). The e2e runner's `scripts/e2e/cleanup.sh` deletes
+networks and is for test hosts only, never production.
 
 ## Known limitations
 
-Documented in plan §10 — filled in for the final release at M7.
+- **Docker networks grow without bound** — one per project, no teardown yet
+  (see the address-pool section above).
+- Documented in plan §10 — full list for the final release at M7.

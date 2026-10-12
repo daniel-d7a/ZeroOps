@@ -114,6 +114,20 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 				return handler.transient(ctx, delivery, job.DeploymentID, "", logger, err)
 			}
 			logger.Info("already built, republished deploy job")
+		} else if currentStatus == "building" {
+			// heartbeat_at is stamped only at claim and goes stale after
+			// 2 min, so a redelivery can steal a dead replica's claim — but
+			// NOT yet if the owner died moments ago. Bounce the message back
+			// onto the retry exchange with the SAME attempt (a busy-wait,
+			// not a retry: the ladder budget is for real failures) instead
+			// of acking it away and stranding 'building' forever.
+			// ponytail: heartbeat is never refreshed mid-build, so a build
+			// running >2 min with an extra duplicate message could be stolen
+			// mid-flight; refresh heartbeat on a ticker if that ever bites.
+			logger.Info("build claim held elsewhere, bouncing for steal window")
+			if err := handler.Broker.PublishRetry(ctx, "build", delivery, queue.ReadAttempt(delivery)); err != nil {
+				return err // infrastructure: crash; the unacked message requeues
+			}
 		} else {
 			// Duplicate delivery or a sibling replica owns it: ack, no work.
 			logger.Info("build skipped", "status", currentStatus)

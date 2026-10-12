@@ -1,0 +1,7 @@
+{
+  "name": "broken-build",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "zeroops-package-that-is-not-published-anywhere": "1.0.0" }
+}
