@@ -53,7 +53,11 @@ const dragOver = ref(false);
 
 // Confirmations on Stop/Redeploy only (M6.3) — shadcn AlertDialog, not
 // window.confirm: focus trap + Esc + accessible description for free.
+// dialogOpen is separate from confirmType: DialogClose's own onClick (close)
+// fires BEFORE our @click, so clearing the type on update:open would wipe it
+// before confirmAction reads it — the confirm would silently no-op.
 const confirmType = ref<ActionType | null>(null);
+const dialogOpen = ref(false);
 
 const confirmCopy: Record<string, { title: string; description: string; confirm: string }> = {
   stop: {
@@ -72,14 +76,18 @@ function requestAction(type: ActionType) {
   actionError.value = '';
   if (type === 'stop' || type === 'redeploy') {
     confirmType.value = type;
+    dialogOpen.value = true;
     return;
   }
   runAction.mutate(type);
 }
 
 function confirmAction() {
+  // Read the type first: DialogClose's close handler may already have flipped
+  // dialogOpen, but confirmType is only cleared here.
   const type = confirmType.value;
   confirmType.value = null;
+  dialogOpen.value = false;
   if (type) runAction.mutate(type);
 }
 
@@ -178,7 +186,7 @@ const busy = computed(() => isTransientStatus(props.project.status));
       <dd>{{ project.desiredState }}</dd>
     </dl>
 
-    <AlertDialog :open="confirmType !== null" @update:open="(v) => !v && (confirmType = null)">
+    <AlertDialog :open="dialogOpen" @update:open="(v) => (dialogOpen = v)">
       <AlertDialogContent v-if="confirmType">
         <AlertDialogHeader>
           <AlertDialogTitle>{{ confirmCopy[confirmType].title }}</AlertDialogTitle>

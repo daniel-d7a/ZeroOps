@@ -1,15 +1,14 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { RouterLink, useRouter } from 'vue-router';
-import { useField, useForm } from 'vee-validate';
-import { toTypedSchema } from '@vee-validate/zod';
-import * as z from 'zod';
-import { ApiError } from '@/api/client';
-import { api } from '@/api/client';
+import { api, ApiError } from '@/api/client';
 import Button from '@/components/ui/Button.vue';
 import Card from '@/components/ui/Card.vue';
 import Input from '@/components/ui/Input.vue';
 import Label from '@/components/ui/Label.vue';
+import { toTypedSchema } from '@vee-validate/zod';
+import { useField, useForm } from 'vee-validate';
+import { ref } from 'vue';
+import { RouterLink, useRouter } from 'vue-router';
+import * as z from 'zod';
 
 const router = useRouter();
 const error = ref('');

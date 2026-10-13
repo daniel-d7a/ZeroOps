@@ -29,7 +29,7 @@ docker compose up -d --build
 
 - Console: http://console.localhost:8080
 - Student apps: http://<slug>.localhost:8080
-- API: http://console.localhost:8080/api (Swagger: `/api/docs`)
+- API: http://console.localhost:8080/api (Swagger: `/api/docs`) 
 
 > Port **8080**, not 80: the host runs Apache on port 80 (pulled in by
 > `libapache2-mod-php8.5`). Traefik still listens on 80 inside its container.

@@ -128,6 +128,10 @@ services:
     image: moby/buildkit:buildx-stable-1
     container_name: buildkit
     privileged: true
+    volumes:
+      # GC policy: cap the OCI worker's cache so student builds can't grow
+      # the Docker Desktop vhdx without bound (see buildkit/buildkitd.toml).
+      - ./buildkit/buildkitd.toml:/etc/buildkit/buildkitd.toml:ro
     healthcheck:
       test: ["CMD-SHELL", "buildctl debug workers >/dev/null 2>&1"]
       interval: 10s

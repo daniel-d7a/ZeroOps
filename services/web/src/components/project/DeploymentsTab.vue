@@ -74,26 +74,40 @@ function select(id: string) {
 }
 
 // Newest first in the list; auto-select it (M6.4: logs are the point).
-watch(deployments.data, (data) => {
-  if (!data?.items.length) return;
-  if (!selectedId.value) {
-    select(data.items[0]!.id);
-    return;
-  }
-  const d = selected.value;
-  if (!d) return;
-  // active -> keep pulling; just turned terminal -> one final pull
-  if (ACTIVE.has(d.status) || d.status !== lastPulledStatus) {
-    lastPulledStatus = d.status;
-    void pullLogs();
-  }
-});
+// Watch dataUpdatedAt, not data: TanStack's structural sharing returns the
+// same object reference when a 2s refetch is deep-equal — which is exactly
+// what a long "building" phase looks like — so watching data freezes the log
+// puller for the whole build. dataUpdatedAt moves on every successful fetch.
+watch(
+  () => deployments.dataUpdatedAt.value,
+  () => {
+    const data = deployments.data.value;
+    if (!data?.items.length) return;
+    if (!selectedId.value) {
+      select(data.items[0]!.id);
+      return;
+    }
+    const d = selected.value;
+    if (!d) return;
+    // active -> keep pulling; just turned terminal -> one final pull
+    if (ACTIVE.has(d.status) || d.status !== lastPulledStatus) {
+      lastPulledStatus = d.status;
+      void pullLogs();
+    }
+  },
+  { immediate: true },
+);
 
 const logBox = ref<HTMLElement | null>(null);
-watch(lines, async () => {
-  await nextTick();
-  if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight;
-});
+// Watch length, not the ref: lines.value.push() mutates in place, which a
+// non-deep ref watch never sees — so autoscroll never fired on new lines.
+watch(
+  () => lines.value.length,
+  async () => {
+    await nextTick();
+    if (logBox.value) logBox.value.scrollTop = logBox.value.scrollHeight;
+  },
+);
 
 const statusClass: Record<string, string> = {
   live: 'bg-emerald-600 text-white border-transparent',

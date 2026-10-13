@@ -1,0 +1,7 @@
+# BuildKit daemon config. Without a GC policy the OCI worker's cache (base
+# image layers, npm installs) grows without bound inside the container's
+# writable layer — which lives in Docker Desktop's vhdx on WSL and never
+# shrinks. Cap it: evicted layers just re-download on the next build.
+[worker.oci]
+  gc = true
+  maxUsedSpace = "3GB"
