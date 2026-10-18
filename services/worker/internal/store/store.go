@@ -430,6 +430,9 @@ func (s *Store) LoadAction(ctx context.Context, actionID string) (ActionInfo, bo
 // ClaimAction moves queued → running. Unlike deployments, actions have no
 // worker/heartbeat columns (plan §8.6): they are short-lived, so a claim
 // lost to a duplicate delivery is simply skipped — the owner finishes it.
+// The one rescue for an orphaned claim lives in the run role: a redelivered
+// (requeued-after-death) message may re-execute a `running` action, so the
+// row can always reach a terminal state.
 func (s *Store) ClaimAction(ctx context.Context, actionID string) (claimed bool, status string, err error) {
 	result, err := s.pool.Exec(ctx, `
 		UPDATE project_actions SET status = 'running'

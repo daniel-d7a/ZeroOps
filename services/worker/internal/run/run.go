@@ -386,6 +386,22 @@ func (handler *Handler) containerEnv(ctx context.Context, projectID string, want
 
 // --- actions (plan §8.6) ---------------------------------------------------
 
+// actionSkip is the action dispatch decision (plan §8.6): only queued
+// deliveries get executed — plus one rescue: a `running` action whose
+// message RabbitMQ requeued (Redelivered=true) means the previous holder
+// died mid-job (unacked on a dead channel) with nobody owning the work
+// anymore. Running it now finishes the row instead of wedging it forever —
+// a claimed-then-killed action otherwise locks every future same-type
+// action for the project behind the API's open-action 409 ("stop never
+// works again").
+// ponytail: a broker channel dying under a *live* holder could also flag
+// Redelivered and double-run one action; the per-project lock serializes
+// the damage and a heartbeat column on project_actions would remove even
+// that — add it only if this ever bites.
+func actionSkip(status string, redelivered bool) bool {
+	return !(status == "queued" || (status == "running" && redelivered))
+}
+
 // handleAction executes one stop/start/restart (plan §8.6): load → skip if
 // not queued → lock → claim → run → finish done/failed. Transient failures
 // release the claim and go through the retry ladder; exhausting the ladder
@@ -406,10 +422,7 @@ func (handler *Handler) handleAction(ctx context.Context, delivery amqp091.Deliv
 	}
 	logger = logger.With("project_id", action.ProjectID, "action_type", action.Type)
 
-	// Already terminal (or a sibling holds the claim): nothing to do — the
-	// plan's "done or failed → ack and skip" (running too, since actions have
-	// no heartbeat steal to fall back on).
-	if action.Status != "queued" {
+	if actionSkip(action.Status, delivery.Redelivered) {
 		logger.Info("action skipped", "status", action.Status)
 		return nil
 	}
