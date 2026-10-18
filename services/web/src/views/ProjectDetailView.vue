@@ -18,13 +18,16 @@ import TabsTrigger from '@/components/ui/TabsTrigger.vue';
 const route = useRoute();
 const id = computed(() => route.params.id as string);
 
-// Header query lives here (shared by every tab): poll while the worker is
-// transitioning — plan §8 moves status asynchronously.
+// Header query lives here (shared by every tab). Poll on a fixed interval:
+// the worker moves status asynchronously (plan §8) and mid-action the pair
+// stays coherent — the API never writes desired_state (schema default is
+// 'running'), the worker writes status+desired_state atomically on success;
+// they only diverge on defaults/failures — nothing to watch, so poll
+// unconditionally. SSE in FIXLIST Phase 2 supersedes this.
 const project = useQuery({
   queryKey: computed(() => ['project', id.value]),
   queryFn: () => getProject(id.value),
-  refetchInterval: (query) =>
-    ['new', 'deploying'].includes(query.state.data?.status ?? '') ? 2500 : false,
+  refetchInterval: 2500,
 });
 
 const statusClass: Record<string, string> = {

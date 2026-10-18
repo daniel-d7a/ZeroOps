@@ -21,6 +21,11 @@ const me = useQuery({ queryKey: ['me'], queryFn: fetchMe });
 const projects = useQuery({
   queryKey: ['projects'],
   queryFn: () => api<{ items: Project[]; total: number }>('/projects'),
+  // Slow keep-fresh: a stop/run action finishes server-side after the
+  // mutation's immediate invalidation already ran, so list badges would sit
+  // stale until navigation. One GET per 15 s keeps them honest (SSE in
+  // FIXLIST Phase 2 will make this event-driven).
+  refetchInterval: 15000,
 });
 
 async function logout() {
