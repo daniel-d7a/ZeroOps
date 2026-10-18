@@ -27,6 +27,10 @@ cp .env.example .env      # then set the secrets
 docker compose up -d --build
 ```
 
+To stop the platform **including student apps**, use `scripts/down.sh`
+(plainer `docker compose down` never touches student containers — they are
+not part of the compose project; see the script header for why that matters).
+
 - Console: http://console.localhost:8080
 - Student apps: http://<slug>.localhost:8080
 - API: http://console.localhost:8080/api (Swagger: `/api/docs`) 
