@@ -37,11 +37,11 @@ func TestReadAttemptAcceptsAllHeaderWidths(t *testing.T) {
 // plan §6 / §11: 3 deliveries (attempt 0, 1, 2) then dead.
 func TestRetryDecisionThreeStrikes(t *testing.T) {
 	cases := []struct {
-		attempt   any
-		gaveUp    bool
-		next      int64
+		attempt any
+		gaveUp  bool
+		next    int64
 	}{
-		{nil, false, 1},    // first delivery → retry #1
+		{nil, false, 1}, // first delivery → retry #1
 		{int64(0), false, 1},
 		{int64(1), false, 2}, // one retry done → retry #2
 		{int64(2), true, 3},  // two retries done → dead

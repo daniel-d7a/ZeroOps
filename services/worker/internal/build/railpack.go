@@ -95,6 +95,20 @@ func runRailpack(ctx context.Context, st *store.Store, logger *slog.Logger, depl
 
 	cmd := exec.CommandContext(runCtx, "railpack",
 		"build", "--name", tag, "--progress", "plain", root)
+	// Noise suppression (FIXLIST 1.2, "fewer lines born, not fewer stored"):
+	// `--progress plain` already killed the animated frames; these env vars
+	// quiet the package-management noise that actually floods student builds
+	// (per-line emission ~resolve/audit/funding spam). They only *reduce*
+	// verbosity — none can flip install semantics the way a generic CI=1
+	// would (CI=true makes npm hard-fail on lockfile drift).
+	// ponytail: whether railpack forwards NPM_CONFIG_* into the BuildKit
+	// plan env is unverified — wire them in a real npm build (e2e 02+) and
+	// drop the vars that don't reach the package manager; harmless if ignored.
+	cmd.Env = append(os.Environ(),
+		"NPM_CONFIG_LOGLEVEL=error",
+		"NPM_CONFIG_FUND=false",
+		"NPM_CONFIG_AUDIT=false",
+	)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("stdout pipe: %w", err)

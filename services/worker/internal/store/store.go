@@ -24,7 +24,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -124,6 +126,11 @@ func (s *Store) MarkBuilt(ctx context.Context, deploymentID, workerID, imageRef 
 	if err != nil {
 		return false, fmt.Errorf("mark built: %w", err)
 	}
+	if result.RowsAffected() == 1 {
+		// Job end: cap the retained log tail (FIXLIST 1.2). Best-effort —
+		// PruneLogs documents why a prune failure must not fail the build.
+		_ = s.PruneLogs(ctx, deploymentID)
+	}
 	return result.RowsAffected() == 1, nil
 }
 
@@ -188,15 +195,59 @@ func (s *Store) SourceForDeployment(ctx context.Context, deploymentID string) (p
 // 4 streams railpack output into deploy_logs, batched ~once per second —
 // batching keeps a chatty build from turning into thousands of round trips).
 // lines must be non-empty; an empty batch is a no-op.
+//
+// Curation (FIXLIST 1.2, provider-style): every line is clamped here — this
+// is the single funnel for all log inserts, so a pathological multi-MB railpack
+// line can never reach the DB. The retained tail is pruned at job end
+// (PruneLogs via MarkBuilt/MarkFailed); during the build the table may hold
+// more, bounded by build length (max 10 min, plan §8.1).
 func (s *Store) AppendLogs(ctx context.Context, deploymentID, stream string, lines []string) error {
 	if len(lines) == 0 {
 		return nil
 	}
+	clamped := make([]string, len(lines))
+	for i, line := range lines {
+		if len(line) > maxLogLineBytes {
+			// Clamping on a byte boundary can split a UTF-8 rune; ToValidUTF8
+			// replaces the stray bytes, so the INSERT never rejects bad text.
+			clamped[i] = strings.ToValidUTF8(line[:maxLogLineBytes], string(utf8.RuneError))
+		} else {
+			clamped[i] = line
+		}
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO deploy_logs (deployment_id, stream, line)
-		SELECT $1, $2, unnest($3::text[])`, deploymentID, stream, lines)
+		SELECT $1, $2, unnest($3::text[])`, deploymentID, stream, clamped)
 	if err != nil {
 		return fmt.Errorf("append logs: %w", err)
+	}
+	return nil
+}
+
+// maxLogLineBytes bounds one deploy_logs line: 2 KB covers every sane build
+// line (npm diagnostics, stack traces) and caps DB growth per line.
+const maxLogLineBytes = 2048
+
+// maxLogLines is the retained tail per deployment (FIXLIST 1.2): anything
+// older is dropped at job end — never read by anything (the API cursor reads
+// forward from what the UI saw), so pruning only ever shrinks dead weight.
+const maxLogLines = 2000
+
+// PruneLogs keeps only the newest maxLogLines lines of one deployment
+// (id is a monotonic bigserial PK — see schema.ts). Best-effort by design:
+// call sites run at job end where the status write already committed, and a
+// log-prune failure must never fail a build. Idempotent.
+func (s *Store) PruneLogs(ctx context.Context, deploymentID string) error {
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM deploy_logs d
+		WHERE d.deployment_id = $1
+		  AND d.id NOT IN (
+			  SELECT id FROM deploy_logs
+			  WHERE deployment_id = $1
+			  ORDER BY id DESC
+			  LIMIT $2)`, deploymentID, maxLogLines)
+	if err != nil {
+		return fmt.Errorf("prune logs: %w", err)
 	}
 	return nil
 }
@@ -305,7 +356,8 @@ func (s *Store) ReleaseClaim(ctx context.Context, deploymentID, workerID, releas
 // that a later deploy already moved to running).
 // The guard is "any open state": correct because only the owning worker calls
 // this while holding a fresh claim, and open states are exactly what a claim
-// can be in. Idempotent on 0 rows (already terminal).
+// can be in. Idempotent on 0 rows (already terminal). At job end the retained
+// log tail is capped (best-effort, FIXLIST 1.2).
 func (s *Store) MarkFailed(ctx context.Context, deploymentID, failure string) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -329,7 +381,13 @@ func (s *Store) MarkFailed(ctx context.Context, deploymentID, failure string) er
 		deploymentID); err != nil {
 		return fmt.Errorf("fail project: %w", err)
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit mark failed: %w", err)
+	}
+	// Prune after the final commit, best-effort (FIXLIST 1.2): the row is
+	// already terminal, so a prune failure has no state to corrupt.
+	_ = s.PruneLogs(ctx, deploymentID)
+	return nil
 }
 
 // MarkLive finishes a deploy in ONE transaction (plan §8.2 step 6). The three

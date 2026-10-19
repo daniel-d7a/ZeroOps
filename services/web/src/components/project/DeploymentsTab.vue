@@ -38,11 +38,21 @@ const deployments = useQuery({
 });
 
 // --- log viewer: cursor accumulation (plan §7 poll ?after=<last id>) ------
+// Curation (FIXLIST 1.2): the viewer keeps a capped window — the store
+// already prunes to the last 2000 lines per deployment, and the live view
+// only ever needs the recent tail. MAX_LINES_PER_PULL is the API-side batch
+// cap (deployments.service.ts): a full batch means "possibly more", which
+// drives the terminal-pull loop below.
+const MAX_LOG_LINES = 1000;
+const MAX_LINES_PER_PULL = 500;
+
 const selectedId = ref<string | null>(null);
 const lines = ref<LogLine[]>([]);
 const nextAfter = ref(0);
 const pulling = ref(false);
 let lastPulledStatus = ''; // pull once more when a deployment turns terminal
+let lastBatchFull = false; // last pull filled a whole batch → maybe more?
+let terminalTicks = 0; // dataUpdatedAt ticks since the terminal flip
 
 const selected = computed(
   () => deployments.data.value?.items.find((d) => d.id === selectedId.value) ?? null,
@@ -55,7 +65,17 @@ async function pullLogs() {
     const res = await api<{ items: LogLine[]; nextAfter: number }>(
       `/deployments/${selectedId.value}/logs?after=${nextAfter.value}`,
     );
-    if (res.items.length) lines.value.push(...res.items);
+    if (res.items.length) {
+      lastBatchFull = res.items.length >= MAX_LINES_PER_PULL;
+      lines.value.push(...res.items);
+      // Drop from the front past the window: a chatty build must not grow
+      // the DOM into tens of thousands of <p> nodes (FIXLIST 1.2).
+      if (lines.value.length > MAX_LOG_LINES) {
+        lines.value.splice(0, lines.value.length - MAX_LOG_LINES);
+      }
+    } else {
+      lastBatchFull = false;
+    }
     nextAfter.value = res.nextAfter;
   } catch {
     // transient fetch failure — next poll retries via the watch
@@ -70,6 +90,8 @@ function select(id: string) {
   lines.value = [];
   nextAfter.value = 0;
   lastPulledStatus = '';
+  lastBatchFull = false;
+  terminalTicks = 0;
   void pullLogs();
 }
 
@@ -89,11 +111,24 @@ watch(
     }
     const d = selected.value;
     if (!d) return;
-    // active -> keep pulling; just turned terminal -> one final pull
-    if (ACTIVE.has(d.status) || d.status !== lastPulledStatus) {
+    if (ACTIVE.has(d.status)) {
       lastPulledStatus = d.status;
+      terminalTicks = 0;
       void pullLogs();
+      return;
     }
+    // Terminal: keep pulling until the tail is drained — a batched build
+    // can overflow the 500-line API cap several times over at flip time,
+    // and the old "one final pull" silently truncated that tail (FIXLIST
+    // 1.2). Keep going while the last batch was full, or for a few ticks
+    // after the flip (the puller can lag the poller by one fetch).
+    if (d.status !== lastPulledStatus) {
+      lastPulledStatus = d.status;
+      terminalTicks = 0;
+    } else if (!lastBatchFull) {
+      terminalTicks++;
+    }
+    if (lastBatchFull || terminalTicks < 3) void pullLogs();
   },
   { immediate: true },
 );
