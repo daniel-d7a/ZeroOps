@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZeroOps — Deploy Lifecycle</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/nav.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Reference</div>
+<div class="crumbs"><a href="architecture.html">architecture</a> → <strong>deploy-lifecycle.html</strong> — from zip to live URL</div>
+
+<h1>Deploy lifecycle: upload → build → run → live</h1>
+<p>The single most important story in this codebase. If you can retell this, you can explain ZeroOps.</p>
+
+<h2>1. The request (API owns it)</h2>
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant W as web SPA
+  participant API as api (NestJS)
+  participant PG as platform-db
+  participant RMQ as rabbitmq
+
+  B->>W: drag zip in DeploymentsTab
+  W->>API: POST /api/projects/:id/deployments (XHR, CSRF header)
+  API->>API: multer tmp file, content sniff, 50 MB cap
+  API->>API: sha256File(), rename → UPLOADS_DIR/projectId/sourceId.zip
+  API->>PG: ONE tx: deployment row status=queued + projects status=deploying
+  API->>RMQ: publish {type:build, deployment_id} → build.x (publisher confirms)
+  Note over API: on publish failure — compensating tx (deployment=failed, project restored)
+  API-->>B: 201 deployment (takes ~200ms)
+</pre>
+</div>
+<table>
+<tr><th>Step</th><th>File</th><th>Function</th></tr>
+<tr><td>HTTP route + multer</td><td><span class="path">services/api/src/projects/projects.controller.ts</span></td><td><code>upload()</code></td></tr>
+<tr><td>zip validation + storage</td><td><span class="path">services/api/src/projects/deployments.service.ts</span></td><td><code>uploadZip()</code></td></tr>
+<tr><td>the ONLY queue insert + status write the API ever does</td><td><span class="path">services/api/src/projects/deployments.service.ts</span></td><td><code>queueDeployment()</code></td></tr>
+<tr><td>publish (confirmed, durable, mandatory)</td><td><span class="path">services/api/src/queue/publisher.service.ts</span></td><td><code>publishBuild()</code></td></tr>
+</table>
+
+<h2>2. The build (worker <code>build</code> role)</h2><div class="diagram">
+<pre class="mermaid">
+graph TD
+  Q["build.q<br>(AMQP)"] --> H["build.Handler.Handle()"]
+  H --> C1["store.ClaimBuild()<br>queued→building (+steal stale 2min)"]
+  C1 --> EX["unzip.Extract()<br>safe: no zip-slip/symlinks<br>needs package.json"]
+  EX --> RB["runRailpack()<br>railpack build --name proj-&lt;id&gt;:&lt;deploymentId&gt;"]
+  RB --> MB["store.MarkBuilt()<br>building→built + WRITE image_ref"]
+  MB --> PD["Broker.PublishDeploy()<br>→ run.x, RK=node-1"]
+</pre>
+</div>
+<ul>
+  <li>Handle: <span class="path">services/worker/internal/build/build.go</span> — <code>Handle()</code> (L84)</li>
+  <li>Safe unzip + <code>package.json</code> requirement: <span class="path">services/worker/internal/build/unzip.go</span> — <code>Extract()</code>; tests in <span class="path">services/worker/internal/build/unzip_test.go</span></li>
+  <li>Railpack through BuildKit (<code>BUILDKIT_HOST=docker-container://buildkit</code>), 10-min timeout: <span class="path">services/worker/internal/build/railpack.go</span> — <code>runRailpack()</code></li>
+  <li>Build log streaming: railpack output → <code>store.AppendLogs()</code> (stream <code>'build'</code>) → API paginates → SPA polls <code>GET /deployments/:id/logs?after=&lt;cursor&gt;</code>. No SSE; the UI polls.</li>
+  <li>Failure rules: checksum mismatch / bad zip = <strong>permanent</strong> (straight to <code>MarkFailed</code>); timeouts/network = <strong>transient</strong> → 3 attempts via retry exchange (see <a href="queue-topology.html">queue-topology</a>).</li>
+  <li>Repair paths (idempotency): message redelivered while already <code>built</code> → just republish the run job; two workers hit "building" on the same node → bounce with same attempt count; image exists → skip rebuild.</li>
+</ul>
+
+<h2>3. The run (worker <code>run</code> role) — where student apps actually become real</h2>
+<div class="diagram">
+<pre class="mermaid">
+graph TD
+  Q["run.node-1.q"] --> H["run.Handler.Handle()<br>handleDeploy()"]
+  H --> L1["store.TryProjectLock<br>(pg_try_advisory_lock)"]
+  L1 --> L2["RunningStudentContainers<br>cap MAX_RUNNING_PER_NODE"]
+  L2 --> CR["store.ClaimRun()<br>built→starting"]
+  CR --> DB["provision.Ensure()<br>if wants_db: CREATE ROLE/DATABASE<br>REVOKE CONNECT (encrypted pw)"]
+  DB --> NET["docker.EnsureProjectNetwork<br>net-&lt;projectId&gt;"]
+  NET --> REPL["replaceContainer()"]
+  REPL --> RC["docker.RunStudent(StudentSpec)<br>0.5 CPU, 1GiB, 256 pids,<br>no-new-privileges, PORT=3000"]
+  RC --> PR["Handler.probe()<br>JoinForProbe → dial :3000 (60s/3-strikes)"]
+  PR --> RT["route.Writer.Write()<br>/dynamic/proj-&lt;projectId&gt;.yml (atomic)"]
+  RT --> ML["store.MarkLive()<br>ONE tx: this→live, prev→superseded,<br>project→running + current_deployment_id"]
+</pre>
+</div>
+<ul>
+  <li>Handle + handleDeploy: <span class="path">services/worker/internal/run/run.go</span> (L79/L95)</li>
+  <li>Container limits & networks: <span class="path">services/worker/internal/docker/docker.go</span> — <code>RunStudent()</code>, <code>EnsureProjectNetwork()</code></li>
+  <li>Env is decrypted here (worker-side): <code>crypt.Decrypt</code> in <code>containerEnv()</code> — cross-language with the API's AES-256-GCM vector, tested in <span class="path">services/worker/internal/crypt/crypt_test.go</span> — <code>TestDecryptAPIVector</code></li>
+  <li>Health probe: <code>ProbeTCP()</code> — 60 s budget, then falls off: previous routing file is never touched, so a failed deploy = old version keeps serving (see e2e <code>05-no-listen.sh</code>).</li>
+  <li>Routing file: <span class="path">services/worker/internal/route/route.go</span> — <code>Write()</code> / <code>Delete()</code>: <code>Host(&lt;slug&gt;.localhost) → http://app-&lt;deploymentId&gt;:3000</code></li>
+</ul>
+
+<h2>4. Status transitions — who writes what (the invariant, visualized)</h2>
+<div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> queued: API. queueDeployment()
+  queued --> building: worker.ClaimBuild
+  building --> built: worker.MarkBuilt (writes image_ref)
+  built --> starting: worker.ClaimRun
+  starting --> live: worker.MarkLive
+  queued --> failed: worker.MarkFailed (permanent)
+  building --> failed: permanent OR 3 strikes
+  starting --> failed: probe fail/permanent
+  live --> superseded: MarkLive of next deploy
+  building --> queued: ReleaseClaim (transient give-up)
+  starting --> built: ReleaseClaim
+  failed --> [*]: user hits Redeploy
+</pre>
+</div>
+<p>All of this lives in <em>one</em> file: <span class="path">services/worker/internal/store/store.go</span>: <code>ClaimBuild</code>, <code>MarkBuilt</code>, <code>ClaimRun</code>, <code>MarkLive</code>, <code>ReleaseClaim</code>, <code>MarkFailed</code>. The API owns <strong>nothing</strong> past <code>queued</code>.</p>
+
+<h2>5. Stop / start / restart — the action lane</h2>
+<p>Separate table (<code>project_actions</code>, partial-unique so only one open action per project+type), separate queue path (<code>run.x</code>, key = nodeId) as <span class="path">services/api/src/projects/actions.service.ts</span> — <code>request()</code>; handled in run.go — <code>handleAction()</code> / <code>runAction()</code>. Note <code>stop</code> calls <code>route.Delete()</code> FIRST so the URL goes down before the container dies.</p>
+
+<footer>See also: <a href="queue-topology.html">why 3×30s retry messaging</a> · <a href="worker-map.html">every worker function</a> · <a href="api-map.html">API surface</a></footer>
+</body>
+</html>

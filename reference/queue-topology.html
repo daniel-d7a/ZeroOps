@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZeroOps — Queue Topology</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/nav.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Reference</div>
+<div class="crumbs"><a href="deploy-lifecycle.html">deploy-lifecycle</a> → <strong>queue-topology.html</strong> — the retry ladder</div>
+
+<h1>RabbitMQ topology: connectivity = a file you can read</h1>
+<p>The <strong>entire</strong> topology is declared in <span class="path">rabbitmq/definitions.json</span> — neither the API nor the worker ever <em>declare</em> queues/exchanges. They verify passively on boot (<code>Open()</code> in <span class="path">services/worker/internal/queue/queue.go</span>; <code>checkExchange/checkQueue</code> in <span class="path">services/api/src/queue/publisher.service.ts</span>). If the file and the code disagree, services die loudly. That's deliberate.</p>
+
+<div class="diagram">
+<pre class="mermaid">
+graph TD
+  subgraph BD["build domain"]
+    api["api.publishBuild()"] -->|RK=build| BX(("build.x"))
+    BX -->|RK build| BQ["build.q"]
+    BQ -->|fail transient| BRX(("build.retry.x")) --> BRQ["build.retry.q<br>x-message-ttl: 30000"]
+    BRQ -->|dead-letter after 30s| BX
+    BX --> BDQ["build.dead.q<br>attempt header, x-failure-reason"]
+  end
+  subgraph RUN["run domain — RK = nodeId"]
+    api2["api.publishAction()"] -->|RK=node-1| RX(("run.x"))
+    RX -->|RK node-1| RQ["run.node-1.q"]
+    RQ -->|transient fail| RRX(("run.retry.x")) --> RRQ["run.node-1.retry.q<br>TTL 30s"]
+    RRQ -->|dead-letter| RX --> RDQ["run.dead.q"]
+  end
+</pre>
+</div>
+
+<h2>The three rules you must be able to explain</h2>
+<table>
+<tr><th>Rule</th><th>Where</th><th>Why</th></tr>
+<tr><td><strong>Manual acks</strong>: ack only after the final DB write.</td><td><span class="path">services/worker/cmd/worker/main.go</span> — <code>deliveryHandler</code>; on handler error → process exits 1 → message requeues</td><td>Crash between container creation and DB write = no lost work on restart</td></tr>
+<tr><td><strong>Transient → 3 tries × 30s</strong>, then dead-queue.</td><td><code>MaxAttempts=3</code>, <code>retryDecision()</code>, <code>RetryOrGiveUp()</code> in <span class="path">services/worker/internal/queue/queue.go</span>; the TTL is on the <em>retry queue itself</em> (dead-lettering is Rabbit's job, not a timer in code)</td><td>Network blips and BuildKit hiccups heal themselves; exhausted failures leave evidence (attempt header + reason)</td></tr>
+<tr><td><strong>Permanent → fail now, no retry</strong>.</td><td><code>isPermanent()</code> (unzip.go) + <code>permanentf()</code>/<code>MarkFailed</code> in <span class="path">services/worker/internal/build/build.go</span></td><td>A bad zip will never succeed the 2000th time</td></tr>
+</table>
+
+<h2>Message payloads — ids only</h2>
+<pre>build job: { "type": "build", "deployment_id": "&lt;uuid&gt;" }
+run/job:   { "type": "deploy", "deployment_id": "&lt;uuid&gt;" }   // or { type: "action", action_id: ... }</pre>
+<div class="invariant"><strong>Invariant:</strong> messages carry ids only; the worker always reloads state from the DB before acting. If two workers race, DB state (not message age) decides. This is why the repair paths exist in <code>build.Handle()</code> — the message may be redelivered while DB says "already built".</div>
+
+<h2>Idempotency ledger (what happens if the same message arrives twice)</h2>
+<table>
+<tr><th>Situation</th><th>Response</th><th>Where</th></tr>
+<tr><td>Already <code>built</code></td><td>Republish run job</td><td>build.go <code>Handle()</code> repair branch</td></tr>
+<tr><td>Other worker mid-build (same node)</td><td>Bounce with same attempt</td><td><code>PublishRetry</code> same-attempt path</td></tr>
+<tr><td>Image already exists</td><td>Skip railpack, <code>MarkBuilt</code></td><td><code>imageExists()</code> in railpack.go</td></tr>
+<tr><td>Redelivered action (already running)</td><td><code>actionSkip()</code></td><td>run.go, <span class="path">services/worker/internal/run/run_test.go</span> — <code>TestActionSkip</code></td></tr>
+<tr><td>Worker died mid-claim</td><td>Claim "steal" after 2-min stale heartbeat</td><td><code>ClaimBuild</code>/<code>ClaimRun</code> stale-heartbeat clause in store.go</td></tr>
+</table>
+
+<footer>Next: <a href="worker-map.html">worker-map</a> · e2e proof: <span class="path">scripts/e2e/17-retry.sh</span> (FORCE_TRANSIENT → 3×30s → dead.q)</footer>
+</body>
+</html>

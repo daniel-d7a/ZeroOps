@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZeroOps — API Map</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/nav.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Reference</div>
+<div class="crumbs"><a href="architecture.html">architecture</a> → <strong>api-map.html</strong> — the NestJS control plane</div>
+
+<h1>services/api — every module, one page</h1>
+<p>The API is deliberately <em>boring</em>: NestJS, Express, one Postgres, one queue publisher. It never talks to Docker. If you're hunting "where is X handled", start here.</p>
+
+<h2>Module graph</h2>
+<table>
+<tr><th>Module</th><th>File</th><th>Contents</th></tr>
+<tr><td><code>AppModule</code></td><td><span class="path">services/api/src/app.module.ts</span></td><td>Wires everything; registers global guards: <code>ThrottlerGuard</code> then <code>CsrfGuard</code> (APP_GUARD), <code>ValidationPipe</code></td></tr>
+<tr><td><code>AuthModule</code></td><td><span class="path">services/api/src/auth/auth.module.ts</span></td><td><code>AuthController</code>, <code>AuthService</code>, <code>SessionGuard</code>, <code>CsrfGuard</code></td></tr>
+<tr><td><code>ProjectsModule</code></td><td><span class="path">services/api/src/projects/projects.module.ts</span></td><td><code>ProjectsController</code>, <code>DeploymentsController</code>, <code>ProjectsService</code>, <code>DeploymentsService</code>, <code>ActionsService</code>, <code>EnvService</code></td></tr>
+<tr><td><code>AdminModule</code></td><td><span class="path">services/api/src/admin/admin.module.ts</span></td><td><code>AdminController</code>, <code>AdminService</code>, <code>AdminSeedService</code></td></tr>
+<tr><td><code>QueueModule</code> (@Global)</td><td><span class="path">services/api/src/queue/queue.module.ts</span></td><td><code>PublisherService</code> — the ONLY producer of AMQP messages</td></tr>
+<tr><td><code>DbModule</code> (@Global)</td><td><span class="path">services/api/src/db/db.module.ts</span></td><td>exports <code>POOL</code> + <code>DRIZZLE</code> tokens, type <code>Db</code></td></tr>
+</table>
+
+<h2>Routing cheatsheet</h2>
+<div class="diagram">
+<pre class="mermaid">
+graph TD
+  A["AuthController"] -->|"POST /auth/register · /auth/login · /auth/logout · GET /auth/me"| AUTH["AuthService<br>register/login/logout/me"]
+  P["ProjectsController"] -->|"POST /projects/:id/deployments (upload)"| DS["DeploymentsService<br>uploadZip"]
+  P -->|"POST /projects/:id/deployments/:sourceId/redeploy"| RD["redeploy"]
+  P -->|"GET/PUT/DELETE env"| EV["EnvService<br>list/put/remove/bulk"]
+  P -->|"POST actions stop/start/restart"| AC["ActionsService.request()"]
+  D["DeploymentsController"] -->|"GET logs (after cursor)"| LG["listLogs()"]
+  AD["AdminController"] -->|"GET /admin/users·system·projects<br>POST stop · PATCH user"| AS["AdminService"]
+</pre>
+</div>
+
+<h2>Auth in 60 seconds</h2>
+<ul>
+  <li>Cookie sessions (<code>express-session</code> + Postgres store, table <code>sessions</code>), <code>rolling: true</code>, 7-day idle + 30-day absolute (<code>startedAt</code> checked by <code>SessionGuard</code>) — <span class="path">services/api/src/auth/auth.controller.ts</span>, <span class="path">services/api/src/main.ts</span>.</li>
+  <li>Login uses <code>DUMMY_HASH</code> compare for unknown users → no user-enumeration (<code>AuthService.login()</code>).</li>
+  <li><code>CsrfGuard</code> (global): double-submit — <code>X-CSRF-Token</code> header vs <code>sess.csrf</code>, compared with <code>timingSafeEqual</code>. Skips GET/HEAD/OPTIONS.</li>
+  <li>Disabled admin user → <code>AdminService.updateUserStatus()</code> deletes their sessions immediately; consistency enforced by DB not background job.</li>
+</ul>
+
+<h2>The 404-not-403 rule (invariant)</h2>
+<div class="invariant"><strong>No user resource of another user should ever leak what exists.</strong> <code>ProjectsService.get()</code>, <code>DeploymentService.assertOwned()</code> — 404 not 403. Admin routes (<code>@Roles('admin')</code> + <code>RolesGuard</code>) bypass; roles are re-read from DB per request, not trusted from session cookie.</div>
+
+<h2>Env vars: encryption details</h2>
+<table>
+<tr><th>Aspect</th><th>Detail</th></tr>
+<tr><td>Algorithm</td><td>AES-256-GCM; wire = base64(iv 12B ‖ authTag 16B ‖ ct)</td></tr>
+<tr><td>Key</td><td><code>ENCRYPTION_KEY</code>, 64 hex chars, cached in <code>key()</code></td></tr>
+<tr><td>API side</td><td><span class="path">services/api/src/common/crypto.ts</span> — <code>encrypt()</code>/<code>decrypt()</code></td></tr>
+<tr><td>Worker side</td><td><span class="path">services/worker/internal/crypt/</span> — Go equivalent, cross-language test <code>TestDecryptAPIVector</code></td></tr>
+<tr><td>Reserved keys</td><td><code>RESERVED_KEYS = {PORT, DATABASE_URL}</code> in <code>env.service.ts</code>; key pattern <code>^[A-Z_][A-Z0-9_]*$</code>, ≤128 chars, ≤50/project; value ≤4 KB</td></tr>
+<tr><td>Bulk editor</td><td><code>EnvService.bulk()</code> — diff <code>.env</code> text: validate all first, one tx, multi-row upsert</td></tr>
+</table>
+
+<h2>DB tables (schema.ts — read as the truth of what state exists)</h2>
+<table>
+<tr><th>Table</th><th>_cols_</th><th>Notes</th></tr>
+<tr><td><code>users</code></td><td>email, passwordHash, role, status</td><td>role: user|admin; status: active|disabled</td></tr>
+<tr><td><code>projects</code></td><td>slug, nodeId, desiredState, status, currentDeploymentId, wantsDb</td><td>status: new|deploying|running|stopped|failed</td></tr>
+<tr><td><code>deployments</code></td><td>status, imageRef, containerName, error, attempt, workerId, heartbeatAt</td><td>the ladder: queued→building→built→starting→live | failed | superseded</td></tr>
+<tr><td><code>sources</code></td><td>path, sha256, deletedAt</td><td>soft-deleted (retention: newest 5 kept — <code>pruneOldSources()</code>)</td></tr>
+<tr><td><code>project_actions</code></td><td>type, status, error, requestedBy</td><td>partial unique index: one open action per project+type</td></tr>
+<tr><td><code>env_vars</code></td><td>key, valueEncrypted</td><td>unique (project_id, key)</td></tr>
+<tr><td><code>project_databases</code></td><td>dbName, dbUser, passwordEncrypted, status</td><td>provisioned by worker run role</td></tr>
+<tr><td><code>workers</code></td><td>roles[], nodeId, lastSeenAt</td><td>heartbeat upsert every 15s (store.UpsertWorker)</td></tr>
+<tr><td><code>deploy_logs</code></td><td>stream, line</td><td><em>bigserial id = the log cursor the SPA paginates with</em></td></tr>
+<tr><td><code>sessions</code></td><td>sess jsonb, expire</td><td>express-session store (also has uid lookups for admin disable)</td></tr>
+</table>
+<p>Migration runner: <span class="path">services/api/src/db/migrate.ts</code>. Worker gates on it: <span class="path">services/worker/internal/store/store.go</span> — <code>CheckSchema()</code>, required row count <code>minSchemaMigration=6</code> (<span class="path">services/worker/internal/config/config.go</span>).</p>
+
+<h2>Config the API reads</h2>
+<pre>SESSION_SECRET · PLATFORM_DB_URL · AMQP_URL · ENCRYPTION_KEY · UPLOADS_DIR
+MAX_PROJECTS_PER_USER(3) · REGISTRATION_ENABLED · ADMIN_EMAIL + ADMIN_PASSWORD (seed)
+BASE_DOMAIN + PUBLIC_PORT (liveUrl building → &lt;slug&gt;.localhost:8080)</pre>
+
+<footer>Next: <a href="worker-map.html">worker-map</a> · <a href="deploy-lifecycle.html">how a deploy uses all this</a></footer>
+</body>
+</html>
