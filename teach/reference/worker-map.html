@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZeroOps — Worker Map</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/nav.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Reference</div>
+<div class="crumbs"><a href="architecture.html">architecture</a> → <strong>worker-map.html</strong> — the Go worker</div>
+
+<h1>services/worker — every internal package, one page</h1>
+<pre class="mermaid">
+graph TD
+  M["cmd/worker/main.go<br>main(): config → db → schema gate<br>→ broker → heartbeat → consume loops"]
+  M --> CFG["internal/config"]
+  M --> BRK["internal/queue<br>(consume build.q + run.&lt;node&gt;.q)"]
+  BRK --> BUILD["internal/build (role=build)"]
+  BRK --> RUN["internal/run (role=run)"]
+  BUILD --> UNZ["internal/... unzip.go<br>railpack.go"]
+  BUILD --> ST["internal/store = ALL SQL"]
+  RUN --> DOCK["internal/docker"]
+  RUN --> PROV["internal/provision<br>student-db DDL"]
+  RUN --> ROUT["internal/route<br>/dynamic files"]
+  RUN --> CR["internal/crypt<br>AES-256-GCM decrypt"]
+  BUILD --> ST
+</pre>
+
+<h2>Startup order (main.go — worth memorizing)</h2>
+<table>
+<tr><th>Step</th><th>Where</th></tr>
+<tr><td><code>config.Load()</code> — WORKER_ROLES in {build, run} (default both), <code>HasRole()</code></td><td><span class="path">services/worker/internal/config/config.go</span></td></tr>
+<tr><td><strong>Schema gate:</strong> refuses to start unless <code>drizzle.__drizzle_migrations</code> has ≥6 rows</td><td><code>CheckSchema()</code> in <span class="path">services/worker/internal/store/store.go</span>; const at config.go:19</td></tr>
+<tr><td>Broker <code>Open()</code> — passive exchange/queue verif.</td><td><span class="path">services/worker/internal/queue/queue.go</span></td></tr>
+<tr><td><code>heartbeatLoop()</code> — upsert workers row every 15s</td><td>main.go — <code>heartbeatLoop()</code></td></tr>
+<tr><td>One consumeLoop goroutine per role; blocks on Wait</td><td>main.go — <code>consumeLoop()</code></td></tr>
+</table>
+
+<h2>Package-by-package</h2>
+
+<h3>internal/queue — the AMQP layer</h3>
+<ul>
+  <li><code>ConsumeBuild()</code> / <code>ConsumeRun(cfg.NodeID)</code> — manual ack, per-role <code>Qos</code> (BUILD_PREFETCH=1, RUN_PREFETCH=4)</li>
+  <li><code>PublishDeploy()</code> — to run.x keyed on node id, publisher-confirms + persistent + mandatory</li>
+  <li>Retry ladder: <code>MaxAttempts=3</code>, <code>ReadAttempt()</code>, <code>retryDecision()</code> (pure — <span class="path">services/worker/internal/queue/retry_test.go</span>), <code>RetryOrGiveUp()</code> → <code>PublishRetry()</code> / <code>PublishDead()</code> (records <code>x-failure-reason</code>)</li>
+</ul>
+
+<h3>internal/build — role = build (one job = one deployment)</h3>
+<table>
+<tr><th>Function</th><th>File</th><th>What</th></tr>
+<tr><td><code>Handle()</code></td><td>build.go</td><td>The bible. Parse → ClaimBuild → SourceForDeployment → verifyChecksum → Extract → imageExists/runRailpack → MarkBuilt → publishDeployJob</td></tr>
+<tr><td><code>Extract()</code></td><td>unzip.go</td><td>zip-slip/symlink/nonregular rejected; 200 MB budget; collapses single top-level dir; requires package.json</td></tr>
+<tr><td><code>runRailpack()</code></td><td>railpack.go</td><td>railpack build inside buildkit; 10-min timeout; live line-drain → AppendLogs (batched 1s/500 lines)</td></tr>
+<tr><td><code>imageTag()</code></td><td>railpack.go:36</td><td><code>proj-&lt;projectId&gt;:&lt;deploymentId&gt;</code> — the ONLY place an image ref is constructed</td></tr>
+<tr><td><code>classifyBuild()</code></td><td>railpack.go</td><td>deadline/cancel → transient; non-zero exit → permanent</td></tr>
+<tr><td><code>permanent()</code>/<code>transient()</code>/<code>dead()</code></td><td>build.go</td><td>failure taxonomy helpers</td></tr>
+</table>
+
+<h3>internal/run — role = run (containers, networks, routing)</h3>
+<table>
+<tr><th>Function</th><th>File</th><th>What</th></tr>
+<tr><td><code>Handle()</code> → <code>handleDeploy()</code>/<code>handleAction()</code></td><td><span class="path">services/worker/internal/run/run.go</span></td><td>dispatch on message type</td></tr>
+<tr><td><code>replaceContainer()</code></td><td>run.go:274</td><td>network → traefik join → (student-db join) → env decrypt → RunStudent → probe → route.Write → remove old</td></tr>
+<tr><td><code>containerEnv()</code></td><td>run.go:354</td><td>crypt.Decrypt env vars + injects PORT=3000, DATABASE_URL (reserved keys stay invisible to users)</td></tr>
+<tr><td><code>probe()</code> + <code>ProbeTCP()</code></td><td>run.go / docker.go</td><td>60s budget, dial container:3000; fail → old deployment untouched</td></tr>
+<tr><td><code>runAction()</code></td><td>run.go:483</td><td>stop = route.Delete BEFORE StopProjectContainers; start reuses container if present; restart = replaceContainer</td></tr>
+<tr><td><code>actionSkip()</code></td><td>run.go:401</td><td>redelivery tolerance (rescue rule)</td></tr>
+</table>
+
+<h3>internal/docker — the only place the socket is touched</h3>
+<ul>
+  <li><code>RunStudent(StudentSpec)</code> — limits: 0.5 CPU / 1 GiB no-swap / 256 pids / on-failure:5 restart / json-file 10m×3 / no-new-privileges / <strong>NetworkMode = net-&lt;projectId&gt; ONLY</strong></li>
+  <li><code>EnsureProjectNetwork</code>, <code>ConnectContainer</code>, <code>JoinForProbe</code>, <code>StopProjectContainers</code>, <code>StartContainer</code>, <code>RemoveProjectImages</code> (keeps live + superseded refs), <code>RunningStudentContainers</code></li>
+</ul>
+
+<h3>internal/route — Traefik file provider</h3>
+<p><code>Writer{Dir, Domain}.Write(projectId, slug, deploymentId)</code> → file <code>/dynamic/proj-&lt;projectId&gt;.yml</code> (temp + rename = atomic). <code>Delete()</code> for stop. Watched by traefik <code>providers.file.watch: true</code>.</p>
+
+<h3>internal/provision — student-db DDL</h3>
+<p><code>Ensure()</code>: identifier pattern <code>p_[0-9a-f]{32}</code>; ensure row → if ready skip → CREATE/ALTER ROLE + CREATE DATABASE + REVOKE CONNECT FROM PUBLIC → MarkDatabaseReady. Creds only ever exist via <code>STUDENT_DB_URL</code> in the worker.</p>
+
+<h3>internal/store — every SQL statement in one file</h3>
+<p>See the transition table in <a href="deploy-lifecycle.html#4">deploy-lifecycle §4</a>: <code>ClaimBuild(steal&gt;2min)</code>, <code>MarkBuilt(writes image_ref)</code>, <code>ClaimRun</code>, <code>MarkLive(one tx: live + superseded + project.current)</code>, <code>ReleaseClaim</code>, <code>MarkFailed</code>. Also <code>AppendLogs(2KB clamp)</code>, <code>PruneLogs(keep 2000)</code>, <code>TryProjectLock</code> (<code>pg_try_advisory_lock(hashtext)</code>), <code>EnvVars(key-ordered)</code>, <code>UpsertWorker</code>.</p>
+
+<h2>Config the worker reads</h2>
+<pre>WORKER_ROLES · NODE_ID(node-1) · STUDENT_DB_URL · BUILDKIT_HOST(docker-container://buildkit)
+BASE_DOMAIN · TRAEFIK_CONTAINER · DYNAMIC_CONFIG_DIR(/dynamic) · UPLOADS_DIR
+MAX_RUNNING_PER_NODE(50) · BUILD_PREFETCH(1) · RUN_PREFETCH(4) · FORCE_TRANSIENT(test hook)</pre>
+
+<h2>Tests worth knowing (interview ammunition)</h2>
+<ul>
+  <li><span class="path">services/worker/internal/build/unzip_test.go</span> — security suite (zip-slip, symlinks, non-regular, count cap)</li>
+  <li><span class="path">services/worker/internal/queue/retry_test.go</span> — 3-strikes decision logic</li>
+  <li><span class="path">services/worker/internal/crypt/crypt_test.go</span> — <code>TestDecryptAPIVector</code>, cross-language AES compat</li>
+  <li><span class="path">services/worker/internal/run/run_test.go</span> — <code>TestActionSkip</code></li>
+  <li><span class="path">scripts/e2e/</span> — 19 scenario files; e.g. <code>16-worker-kill.sh</code>, <code>17-retry.sh</code></li>
+</ul>
+
+<footer><a href="queue-topology.html">queue-topology</a> · <a href="deploy-lifecycle.html">deploy-lifecycle</a> · <a href="api-map.html">api-map</a></footer>
+</body>
+</html>

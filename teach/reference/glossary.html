@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZeroOps — Glossary</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/nav.js" defer></script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Reference</div>
+<div class="crumbs"><a href="architecture.html">architecture</a> → <strong>glossary.html</strong></div>
+
+<h1>Glossary — say these words exactly</h1>
+<table>
+<tr><th>Term</th><th>Means</th><th>Lives at</th></tr>
+<tr><td><strong>Control plane</strong></td><td>api + platform-db + rabbitmq: everything that decides what should happen</td><td><span class="path">services/api</span></td></tr>
+<tr><td><strong>Worker role</strong></td><td>What a worker instance does: <code>build</code> or <code>run</code>; same binary, one env var picks this</td><td><code>WORKER_ROLES</code></td></tr>
+<tr><td><strong>Node</strong></td><td>A logical worker host id (<code>NODE_ID=node-1</code>); run-queue routing key — actions/jobs land on the node the containers run on</td><td><code>run.node-1.q</code></td></tr>
+<tr><td><strong>Source</strong></td><td>An uploaded zip (stored + sha256'd); the input to a deployment</td><td><code>sources</code> table, <code>uploadZip()</code></td></tr>
+<tr><td><strong>Deployment</strong></td><td>One build+run attempt of one source; the state ladder lives here</td><td><code>deployments</code> table</td></tr>
+<tr><td><strong>image_ref</strong></td><td><code>proj-&lt;projectId&gt;:&lt;deploymentId&gt;</code> — written once by MarkBuilt, read back by run role. The only container identity</td><td><code>imageTag()</code></td></tr>
+<tr><td><strong>Project lock</strong></td><td><code>pg_try_advisory_lock(hashtext(projectId))</code> — serializes deploy/action on a project</td><td><code>TryProjectLock</code></td></tr>
+<tr><td><strong>Claim / steal</strong></td><td>Atomic transition claiming a job; another worker's claim is stolen if heartbeat &gt; 2 min stale</td><td><code>ClaimBuild/ClaimRun</code></td></tr>
+<tr><td><strong>File provider</strong></td><td>Traefik reading YAML from <code>/dynamic</code>; how student apps get routes</td><td><code>route.Writer</code></td></tr>
+<tr><td><strong>Retry ladder</strong></td><td>transient → *.retry.q (TTL 30s) → back to main exchange, 3× → *.dead.q</td><td><code>retryDecision()</code></td></tr>
+<tr><td><strong>Reserved keys</strong></td><td><code>PORT</code>, <code>DATABASE_URL</code> — user cannot set; injected provision-side</td><td><code>RESERVED_KEYS</code></td></tr>
+<tr><td><strong>probe</strong></td><td>TCP dial of container:3000, 60 s budget; pass = write route file</td><td><code>ProbeTCP</code></td></tr>
+<tr><td><strong>Superseded</strong></td><td>previous live deployment bumped out by MarkLive of the new one</td><td><code>MarkLive</code></td></tr>
+</table>
+
+<footer><a href="architecture.html">architecture</a> — start here</footer>
+</body>
+</html>

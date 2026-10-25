@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lesson 2 — ZeroOps as a Finite State Machine</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/nav.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 2</div>
+<div class="crumbs"><a href="0001-architecture-30000ft.html">lesson 1</a> · <a href="../reference/deploy-lifecycle.html">deploy-lifecycle (reference)</a> · <a href="../reference/queue-topology.html">queue-topology (reference)</a></div>
+
+<h1>Lesson 2: ZeroOps as a finite state machine</h1>
+<p><strong>Win by the end:</strong> given any line in <code>build.Handle()</code> or <code>handleDeploy()</code>, you can say what state the row was in, why the next line can only ever do what it does, and where the message lands when it fails.</p>
+
+<p>ZeroOps runs <strong>three state machines</strong> on top of each other. Confusing them is why people get lost:</p>
+<ul>
+  <li><strong>Machine A — the message ladder</strong> (RabbitMQ: attempt counter, retry/dead queues)</li>
+  <li><strong>Machine B — the deployment ladder</strong> (<code>deployments.status</code>: queued→building→built→starting→live/failed/superseded)</li>
+  <li><strong>Machine C — the theatre ladder</strong> (<code>projects.status</code>, <code>project_actions.status</code>, <code>project_databases.status</code>)</li>
+</ul>
+<p>A is about <em>"will I be asked again?"</em> B is about <em>"how far did the work get?"</em> C is about <em>"what does the user see?"</em></p>
+
+<h2>Machine B — the deployment ladder, every edge</h2>
+<div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+   [*] --> queued: API projects/queueDeployment
+   queued --> building: ClaimBuild (worker wins)
+   queued --> failed: ClaimBuild error path / permanent at checksum+unzip+railpack+MarkBuilt
+   building --> built: MarkBuilt (writes image_ref)
+   building --> queued: ReleaseClaim (transient give-up or claim-crash)
+   building --> failed: permanent (zip/build) OR ladder exhausted
+   built --> starting: ClaimRun (run-worker wins)
+   built --> failed: permanent pre-claim (no image)
+   starting --> live: MarkLive (one tx)
+   starting --> built: ReleaseClaim (transient give-up)
+   starting --> failed: replaceContainer permanent OR ladder exhausted
+   live --> superseded: MarkLive of the NEXT deployment
+   failed --> [*]: user clicks Redeploy (new row, source reused)
+   superseded --> [*]: image kept until pruned
+</pre>
+</div>
+
+<h3>Every edge, with its trigger and its only writer</h3>
+<table>
+<tr><th>Edge</th><th>Trigger</th><th>Writer</th></tr>
+<tr><td><code>queued → building</code></td><td>build-worker processes <code>build.q</code> message</td><td><span class="path">services/worker/internal/store/store.go</span> — <code>ClaimBuild()</code>: CAS <code>WHERE status='queued' OR (status='building' AND heartbeat_at &lt; now()-2min)</code></td></tr>
+<tr><td><code>building → built</code></td><td>railpack exited 0 with <code>proj-&lt;id&gt;:&lt;deploymentId&gt;</code> present</td><td><code>MarkBuilt()</code> — CAS on <code>worker_id</code>, stamps <code>image_ref</code></td></tr>
+<tr><td><code>building → queued</code></td><td>transient failure while building (DB flicker, buildkit hiccup, ladder not yet exhausted)</td><td><code>ReleaseClaim(deploymentID, workerID, "queued")</code> — only releases the <em>caller's own</em> claim (status building/starting, worker_id = self)</td></tr>
+<tr><td><code>building → failed</code></td><td>permanent failure (checksum, zip security, railpack exit ≠ 0, no package.json) or 3rd transient strike</td><td><code>MarkFailed()</code></td></tr>
+<tr><td><code>built → starting</code></td><td>run-worker processes the deploy job from <code>run.&lt;node&gt;.q</code></td><td><code>ClaimRun()</code> — same CAS + 2-min steal</td></tr>
+<tr><td><code>built → failed</code></td><td><code>image_ref == ""</code> on a built row ("use Redeploy") or capacity check (permanent, pre-claim)</td><td><code>MarkFailed()</code></td></tr>
+<tr><td><code>starting → live</code></td><td>container created + probe passed + route file written</td><td><code>MarkLive()</code> — ONE tx: <code>this → live</code>, <code>previous live → superseded</code>, project → running + <code>current_deployment_id</code></td></tr>
+<tr><td><code>starting → built</code></td><td>transient failure during container/promote phase</td><td><code>ReleaseClaim(..., "built")</code> — release to the <em>pre-claim</em> state, not the current one</td></tr>
+<tr><td><code>starting → failed</code></td><td>probe fail, image missing, node at capacity, or 3rd strike</td><td><code>MarkFailed()</code></td></tr>
+<tr><td><code>live → superseded</code></td><td>the next MarkLive completes</td><td><code>MarkLive()</code> (same tx — atomic cutover, no downtime window)</td></tr>
+</table>
+<div class="invariant"><strong>You can predict the API from this table:</strong> notice the API writes <em>only</em> <code>queued</code> (insert) and reads everything else. Every other edge belongs to <code>store.go</code>.</div>
+
+<h2>Machine A — the message ladder (AMQP)</h2>
+<div class="diagram">
+<pre class="mermaid">
+graph TD
+  P["publish (persistent, confirmed)"] --> Q["main queue<br>build.q / run.node-1.q"]
+  Q --> T{"fail?"}
+  T -->|"no: final DB write done"| ACK["ack — done"]
+  T -->|"transient, attempt &lt; 3"| RX["retry.x → retry.q<br>sleeps 30s (x-message-ttl)"]
+  RX -->|"dead-letter (attempt+1 header)"| Q
+  T -->|"3rd strike (retryDecision)"| DX["dead.q<br>attempt + x-failure-reason"]
+  T -->|"permanent OR poisoned msg"| PERM["MarkFailed + ack<br>(NOT dead-lettered)"]
+  Q -->|"worker crashes, unacked"| RED["redelivery = same attempt"]
+</pre>
+</div>
+<table>
+<tr><th>Question</th><th>Answer</th><th>Exact code</th></tr>
+<tr><td>How many tries does a transient job get?</td><td>3 deliveries (attempt headers 0, 1, 2), then dead</td><td><span class="path">services/worker/internal/queue/queue.go</span> — <code>MaxAttempts=3</code>, <code>retryDecision()</code></td></tr>
+<tr><td>Who sleeps 30 seconds?</td><td><em>Rabbit, not code</em>: the retry <em>queue</em> carries <code>x-message-ttl:30000</code> and dead-letters back to the main exchange</td><td><span class="path">rabbitmq/definitions.json</span></td></tr>
+<tr><td>When is the ack emitted?</td><td>Only after the final DB write (or dead-letter publish). Crash before it = free redelivery.</td><td><span class="path">services/worker/cmd/worker/main.go</span> — <code>deliveryHandler</code> acks after handler-done; handler errors force <code>exit(1)</code></td></tr>
+</table>
+
+<h2>Machine A ∩ Machine B — the four failure classes</h2>
+<table>
+<tr><th>Class</th><th>Meaning</th><th>Row ends as</th><th>Message ends as</th><th>Real examples</th></tr>
+<tr><td><strong>1 · Permanent</strong></td><td>"No retry could ever succeed — the DB row is the record"</td><td><code>failed</code> (with cause in <code>error</code>)</td><td>acked, nothing in dead.q</td><td>zip missing/pruned, checksum mismatch, zip-slip/symlink/no <code>package.json</code>, railpack exit≠0, <code>image_ref</code> empty, image missing at run, node at capacity (<code>MAX_RUNNING_PER_NODE</code>), probe fail</td></tr>
+<tr><td><strong>2 · Transient</strong></td><td>"Might work later — climb the ladder"</td><td><code>failed</code> only after strike 3; between strikes it's <code>building</code>/<code>built</code>/<code>starting</code></td><td>dead.q with <code>x-failure-reason</code></td><td>DB unreachable, AMQP error, buildkit unreachable, source <code>SourceForDeployment</code> error, log-append error, project lock busy</td></tr>
+<tr><td><strong>3 · Infra crash</strong></td><td>"Worker died mid-flight"</td><td>stays <code>building</code>/<code>starting</code>, heartbeat goes stale</td><td>redelivered unacked (no new attempt header)</td><td>kill -9, OOM of the worker container, docker reboot</td></tr>
+<tr><td><strong>4 · Busy bounce</strong></td><td>"Someone else is on it — a <em>wait</em>, not a retry"</td><td>unchanged (<code>building</code>/<code>starting</code>), owner's claim intact</td><td>re-published with the <em>same</em> attempt</td><td>duplicate message while owner alive &lt; 2 min</td></tr>
+</table>
+<p>The gates for each class in code: <span class="path">services/worker/internal/build/unzip.go</span> — <code>permanentf()</code>/<code>isPermanent()</code>; <span class="path">services/worker/internal/build/railpack.go</span> — <code>classifyBuild()</code>; <span class="path">services/worker/internal/run/run.go</span> — <code>permanentError{"health check failed"}</code>, <code>image missing</code> (L310, L321); the handlers <code>Handler.permanent()</code>/<code>Handler.transient()</code> in <span class="path">services/worker/internal/build/build.go</span>.</p>
+
+<h2>Build function: every branch of <code>build.Handle()</code></h2>
+<table>
+<tr><th>#</th><th>Call</th><th>Failure → classification</th><th>Row stays/ends</th><th>Message fate</th></tr>
+<tr><td>1</td><td><code>json.Unmarshal</code> / type check</td><td>poisoned / unexpected type → <strong>permanent</strong></td><td>foreground no-DB; keeps raw payload</td><td>dead.q immediately (never retried)</td></tr>
+<tr><td>2</td><td><code>ClaimBuild</code> — call errored</td><td>DB down → <strong>transient</strong>; best-effort <code>ReleaseClaim("queued")</code> first so our own fresh heartbeat cannot block the retry</td><td>queued</td><td>retry ladder</td></tr>
+<tr><td>3</td><td><code>ClaimBuild</code> — lost, <code>currentStatus==built</code></td><td><strong>repair</strong>: republish the run job</td><td>built</td><td>acked</td></tr>
+<tr><td>4</td><td>lost, <code>currentStatus==building</code></td><td><strong>busy bounce</strong> (owner alive)</td><td>building</td><td>retry exchange, same attempt</td></tr>
+<tr><td>5</td><td>lost, other status (running/live/failed)</td><td>duplicate delivery</td><td>—</td><td>acked, no-op</td></tr>
+<tr><td>6</td><td><code>SourceForDeployment</code> — <code>!found</code></td><td><strong>permanent</strong> (pruned or gone)</td><td>failed</td><td>acked</td></tr>
+<tr><td>7</td><td><code>verifyChecksum</code> — mismatch/missing</td><td><strong>permanent</strong>; other I/O → transient</td><td>failed / queued</td><td>acked or ladder</td></tr>
+<tr><td>8</td><td><code>Extract()</code> — zip problems</td><td><strong>permanent</strong> all archive-problem classes (<code>isPermanent</code>)</td><td>failed</td><td>acked</td></tr>
+<tr><td>9</td><td><code>Extract()</code> — disk/IO errors</td><td><strong>transient</strong></td><td>queued</td><td>ladder</td></tr>
+<tr><td>10</td><td><code>imageExists(tag)</code> — true</td><td><strong>repair</strong>: skip railpack</td><td>building (about to MarkBuilt)</td><td>continues</td></tr>
+<tr><td>11</td><td><code>runRailpack()</code> — exit ≠ 0 / bad Dockerfile</td><td><strong>permanent</strong> (<code>classifyBuild</code>)</td><td>failed</td><td>acked</td></tr>
+<tr><td>12</td><td><code>runRailpack()</code> — timeout/cancel/network</td><td><strong>transient</strong></td><td>queued (release)</td><td>ladder</td></tr>
+<tr><td>13</td><td><code>MarkBuilt</code> — errored</td><td><strong>transient</strong>, claim still ours</td><td>queued (release)</td><td>ladder</td></tr>
+<tr><td>14</td><td><code>MarkBuilt</code> — CAS lost</td><td>stealer owns it</td><td>—</td><td>acked, no-op</td></tr>
+<tr><td>15</td><td><code>publishDeployJob</code> — errored</td><td><strong>transient</strong>, but status already <code>built</code> → next delivery hits branch 3</td><td>built</td><td>ladder</td></tr>
+</table>
+<p>After ANY of these exits, <code>defer os.RemoveAll(destDir)</code> (L166) cleans <code>/work</code>. Post-<code>MarkLive</code>, <code>RemoveProjectImages</code> prunes to keep live + superseded (run.go L207-213).</p>
+
+<h2>Run function: every branch of <code>handleDeploy()</code></h2>
+<table>
+<tr><th>#</th><th>Call</th><th>Failure → classification</th><th>Row</th><th>Message fate</th></tr>
+<tr><td>1</td><td><code>LoadDeployment</code> — <code>!found</code></td><td>row gone (cleaned up earlier)</td><td>absent</td><td>acked, no-op</td></tr>
+<tr><td>2</td><td><code>TryProjectLock</code> — busy</td><td><strong>transient</strong> — 30s retry-TTL is the natural lock backoff</td><td>built</td><td>ladder</td></tr>
+<tr><td>3</td><td><code>RunningStudentContainers ≥ MAX_RUNNING_PER_NODE</code></td><td><strong>permanent</strong> <em>before claim</em> — "node at capacity", retry hits same wall</td><td>failed</td><td>acked</td></tr>
+<tr><td>4</td><td><code>ClaimRun</code> lost, <code>currentStatus==starting</code></td><td><strong>busy bounce</strong></td><td>starting</td><td>retry exchange, same attempt</td></tr>
+<tr><td>5</td><td><code>image_ref == ""</code></td><td><strong>permanent</strong> "use Redeploy"</td><td>failed</td><td>acked</td></tr>
+<tr><td>6</td><td><code>provision.Ensure()</code> — DDL fails</td><td><strong>transient</strong>, release target = <code>built</code> (pre-claim state!)</td><td>built</td><td>ladder</td></tr>
+<tr><td>7</td><td><code>RunStudent</code> — image gone</td><td><strong>permanent</strong> (<code>docker.ErrImageMissing</code>)</td><td>failed</td><td>acked</td></tr>
+<tr><td>8</td><td><code>probe()</code> fails</td><td><strong>permanent</strong> — BUT the old deployment is left untouched: failed deploy ≠ downtime (e2e <code>05-no-listen.sh</code>)</td><td>failed (new row only)</td><td>acked</td></tr>
+<tr><td>9</td><td><code>route.Writer.Write()</code> — disk full</td><td><strong>transient</strong>, release to <code>built</code></td><td>built</td><td>ladder</td></tr>
+<tr><td>10</td><td><code>MarkLive</code> — errored (tx rollback)</td><td><strong>transient</strong>, release to <code>built</code></td><td>built</td><td>ladder</td></tr>
+<tr><td>11</td><td><code>RemoveProjectImages</code>(prune)</td><td>log-only — never fails the deploy</td><td>live</td><td>acked</td></tr>
+</table>
+
+<h2>Machine C — projects, actions, databases</h2>
+<div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  state "projects.status" as P {
+    [*] --> new: ProjectsService.create
+    new --> deploying: queueDeployment
+    deploying --> running: worker MarkLive
+    deploying --> failed: worker MarkFailed
+    failed --> deploying: Redeploy / new upload
+    running --> stopped: action stop → SetProjectState
+    stopped --> running: action start
+    running --> running: action restart (containers swap, status stays)
+  }
+  state "project_actions.status" as A {
+    state "queued" as aq
+    state "running" as ar
+    state "failed" as afailed
+    [*] --> aq: ActionsService.request
+    aq --> ar: ClaimAction (worker)
+    ar --> done: FinishAction
+    ar --> afailed: FinishAction
+    aq --> afailed: actionTransient give-up
+    ar --> aq: ReleaseAction (transient)
+  }
+  state "project_databases.status" as D {
+    [*] --> provisioning: EnsureDatabaseRow
+    provisioning --> ready: Provisions MarkDatabaseReady
+  }
+</pre>
+</div>
+<table>
+<tr><th>Detail</th><th>Why it exists</th><th>Where</th></tr>
+<tr><td>Actions: partial unique index on <code>(project_id, type) WHERE status IN ('queued','running')</code></td><td>One <em>pending</em> action per project per type; pressing restart 10 times = 1 row + 1 message</td><td><span class="path">services/api/src/db/schema.ts</span>, insert via <code>ActionsService.request()</code> with <code>onConflictDoNothing</code></td></tr>
+<tr><td>Actions have NO heartbeat/steal</td><td>Redelivery while <code>running</code> is tolerated: <code>ClaimAction</code> only claims <code>queued</code>; a re-<em>Claim</em> of <code>running</code> = skipped (idempotent work)</td><td><code>ClaimAction</code>, plus <code>actionSkip()</code> in run.go, tested in <span class="path">services/worker/internal/run/run_test.go</span></td></tr>
+<tr><td><code>FinishAction</code> accepts <code>'queued'</code> too</td><td>Giving up <em>before any claim</em> (DB down all 3 strikes) still terminalizes the row — no zombie queued forever</td><td>store.go <code>FinishAction()</code></td></tr>
+<tr><td>stop = route.Delete BEFORE container stop</td><td>URL dies <em>before compute does</em> — no 502 windows for the user</td><td><code>runAction()</code> stop case in run.go</td></tr>
+<tr><td><code>MarkFailed</code> cascades to the project</td><td><code>projects.status='failed' IF it was deploying</code> — in the same tx</td><td>store.go L361-380</td></tr>
+<tr><td>Databases are once-per-project</td><td>Later deploys see <code>ready</code> and skip all DDL</td><td><code>provision.Ensure()</code>, <code>MarkDatabaseReady()</code></td></tr>
+</table>
+
+<h2>Diamonds to remember (recovery, not just failure)</h2>
+<table>
+<tr><th>Wedge risk</th><th>Rescue</th><th>Where</th></tr>
+<tr><td>Worker died while building → row wedged in <code>building</code></td><td>claim CAS lets a new delivery steal once <code>heartbeat_at</code> &gt;2 min stale</td><td><code>ClaimBuild</code>/<code>ClaimRun</code> WHERE clause (store.go:94/L301)</td></tr>
+<tr><td>Published image but crashed before MarkBuilt</td><td>branch 10 build — <code>imageExists → skip railpack</code></td><td>build.go L184</td></tr>
+<tr><td>MarkBuilt succeeded but run-publish lost</td><td>branch 3 build — <code>currentStatus==built → publishDeployJob</code></td><td>build.go L109</td></tr>
+<tr><td>Two workers claim by racing</td><td>CAS + <code>worker_id</code> — loser no-ops at MarkBuilt/MarkLive (branch 13/14 pattern)</td><td><code>claims_test.go</code> — <code>TestClaimQueries</code></td></tr>
+<tr><td>DB down entire 3-strike ladder mid-action</td><td>row stuck <code>queued</code>? No: <code>FinishAction</code> CAS covers <code>queued</code> too</td><td>store.go L531-537</td></tr>
+</table>
+
+<h2>Quiz (retrieve, don't peek)</h2>
+<div data-quiz='[
+{"q":"Which deployment statuses may the API write?","options":["any intermediate status needed","only queued past the insert","all statuses from controllers","everything except live states"],
+ "answer":1,"why":"everything past the initial queued insert is written by the worker (store.go)."},
+{"q":"A source zip contains a symlink — which failure class?","options":["infra crash redelivery","busy bounce wait","transient climb ladder","permanent fail now"],
+ "answer":3,"why":"unzip.go permanentf — a security-class archive problem can never pass on any retry."},
+{"q":"Row short-stuck in building, heartbeat 3 min stale, duplicate message arrives: outcome?","options":["redelivery gets skipped","failure gets recorded","heartbeat gets stolen","duplicate self-cleans"],
+ "answer":2,"why":"ClaimBuild CAS admits building-heartbeat older than the 2-min steal window."},
+{"q":"Node has reached its student-container capacity — what is the deploy message?","options":["acked with fail capacity","parked in retry queue","bounced with same attempt","dead-lettered without claim"],
+ "answer":0,"why":"handleDeploy pre-claim capacity check is permanent — a retry hits the same wall."},
+{"q":"How many retry queues exist across both domains?","options":["one per exchange pair","none: only dead queues","one global shared queue","one per worker replica"],
+ "answer":0,"why":"build.retry.q + run.retry.q pair; each after its 30 s TTL dead-letters into its own main exchange."}
+]'></div>
+
+<p><em>Check answers explain themselves — re-derive the branch numbers from the tables above if you got something wrong.</em></p>
+
+<footer>Reference for Machine B: <a href="../reference/deploy-lifecycle.html">deploy-lifecycle</a>; Machine A: <a href="../reference/queue-topology.html">queue-topology</a>; the truth-test: <span class="path">services/worker/internal/store/store.go</span> — every write cited here is SQL in that file.</footer>
+</body>
+</html>

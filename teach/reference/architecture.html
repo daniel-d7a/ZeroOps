@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ZeroOps — Architecture Map</title>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/nav.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'neutral' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Reference</div>
+<div class="crumbs"><a href="https://github.com/daniel-d7a/ZeroOps/blob/main/AGENTS.md" target="_blank" rel="noopener">AGENTS.md</a> → <strong>architecture.html</strong> — the big map</div>
+
+<h1>The 30,000-ft map</h1>
+<p>ZeroOps is a <strong>Railway-like hosting platform for student projects</strong>. One user-facing flow exists: sign up → create a project → upload a Node zip → (optionally get a Postgres DB) → set env vars → get a live URL at <code>&lt;slug&gt;.localhost:8080</code>. Everything below exists to serve that flow.</p>
+
+<h2>The mental model in one line</h2>
+<p><strong>The browser talks only to Traefik. The API never touches Docker. Docker is touched only by the Go worker. The worker and API share nothing but the Postgres tables and the RabbitMQ exchanges.</strong></p>
+
+<div class="diagram">
+<pre class="mermaid">
+graph TD
+  BR(("&#127760; Browser")) --> T["traefik<br>:80 inside its container<br>published as host :8080"]
+  T -->|"Host=console.localhost<br>PathPrefix /api<br>(docker label console-api)"| API["api (NestJS)<br>control plane :3000"]
+  T -->|"Host=console.localhost<br>(docker label console-web)"| WEB["web (Vue SPA)<br>Caddy :80"]
+  T -->|"Host=&lt;slug&gt;.localhost<br>(file provider, NO labels)"| APP["app-&lt;deploymentId&gt;<br>student container :3000"]
+
+  API --> PG[(platform-db<br>users/projects/deployments)]
+  API -->|"build.x / run.x"| RMQ(("rabbitmq"))
+  WK["worker (Go)<br>roles: build, run"] -->|"consume .q"| RMQ
+  WK --> PG
+  WK -->|"queue worker roles only"| DK(("docker.sock"))
+  DK --> BK["buildkit<br>railpack builds"]
+  DK --> APP
+  WK -->|"writes YAML"| DY["/dynamic volume<br>shared with traefik"]
+  DY --> T
+  BK --> APP
+  SDB[(student-db)] --> APP
+  WK --> SDB
+</pre>
+</div>
+
+<h2>Why each box exists</h2>
+<table>
+<tr><th>Box</th><th>Job</th><th>Where it's defined</th></tr>
+<tr><td><strong>traefik</strong></td><td>The <em>only</em> published edge. Routes console (via Docker labels) and student apps (via file provider). Gets the docker socket <em>read-only</em>.</td><td><span class="path">traefik/traefik.yml</span>, <span class="path">docker-compose.yml</span> labels, <span class="path">docker-compose.yml</span></td></tr>
+<tr><td><strong>api</strong></td><td>Control plane: auth, projects, uploads, env vars, admin. Publishes jobs; never manipulates containers.</td><td><span class="path">services/api/src/main.ts</span> → <code>bootstrap()</code>, <span class="path">services/api/src/app.module.ts</span></td></tr>
+<tr><td><strong>web</strong></td><td>Static Vue SPA served by Caddy; talks to <code>/api</code> same-origin (no CORS by design).</td><td><span class="path">services/web/src/api/client.ts</span> — <code>api()</code></td></tr>
+<tr><td><strong>worker</strong></td><td>The muscle. Role <code>build</code>: unzip + railpack. Role <code>run</code>: containers, networks, health probe, routing files.</td><td><span class="path">services/worker/cmd/worker/main.go</span> — <code>main()</code></td></tr>
+<tr><td><strong>buildkit</strong></td><td>BuildKit daemon; railpack runs inside it. Privileged, GC-capped at 3 GB.</td><td><span class="path">docker-compose.yml</span> <code>buildkit</code>, <span class="path">buildkit/buildkitd.toml</span></td></tr>
+<tr><td><strong>rabbitmq</strong></td><td>Job bus. Definitions file is the source of truth for topology.</td><td><span class="path">rabbitmq/definitions.json</span></td></tr>
+<tr><td><strong>platform-db</strong></td><td>Users, projects, deployments, env vars, workers, logs — platform metadata only.</td><td><span class="path">services/api/src/db/schema.ts</span></td></tr>
+<tr><td><strong>student-db</strong></td><td>Student Postgres databases. Only the worker (run role) and the students themselves know its creds.</td><td><span class="path">services/worker/internal/provision/provision.go</span> — <code>Ensure()</code></td></tr>
+<tr><td><strong>migrate</strong></td><td>One-shot drizzle migration container; must succeed before api/worker start.</td><td><span class="path">services/api/src/db/migrate.ts</span> — <code>main()</code></td></tr>
+</table>
+
+<h2>The three networks — the actual security boundary</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  subgraph edge
+    T(("traefik")); API["api"]; WEB["web"]
+  end
+  subgraph platform
+    API2["api"]; RMQ(("rabbitmq")); PG[(platform-db)]; BK["buildkit"]; MIG["migrate"]; WK2["worker"]
+  end
+  subgraph db
+    WK3["worker"]; SDB[(student-db)]
+  end
+  subgraph NETP["net-&lt;projectId&gt; — one per project"]
+    APP["student containers"]; T3(("traefik attached")); SDB3[(student-db attached if wants_db)]
+  end
+  edge ~~~ platform
+  platform ~~~ db
+  db ~~~ NETP
+</pre>
+</div>
+<ul>
+  <li><strong>edge</strong> — who's reachable from outside: traefik, api, web.</li>
+  <li><strong>platform</strong> — control plane gossip: api, worker, rabbitmq, both DBs, buildkit.</li>
+  <li><strong>db</strong> — only worker ↔ student-db. Student app containers join <strong>only</strong> <code>net-&lt;projectId&gt;</code>, never edge/platform/db (<span class="path">services/worker/internal/docker/docker.go</span> — <code>RunStudent()</code>, <code>NetworkMode</code>).</li>
+</ul>
+
+<h2>URL routing rules (memorize these)</h2>
+<table>
+<tr><th>Request</th><th>Goes to</th><th>Why</th></tr>
+<tr><td><code>Host=console.localhost</code> + <code>PathPrefix /api</code></td><td>api :3000</td><td>Docker label <code>console-api</code> in <span class="path">docker-compose.yml</span></td></tr>
+<tr><td><code>Host=console.localhost</code> (everything else)</td><td>web (Caddy :80, SPA fallback <code>try_files {path} /index.html</code>)</td><td>Docker label <code>console-web</code>; in dev overlay → Vite :5173</td></tr>
+<tr><td><code>Host=&lt;slug&gt;.localhost</code></td><td>student container :3000</td><td>File provider — worker writes <code>/dynamic/proj-&lt;projectId&gt;.yml</code>; old deployment keeps serving until the new one is healthy</td></tr>
+</table>
+<div class="invariant"><strong>Invariant:</strong> no Traefik labels on student containers — routing is file-provider only, written by the worker after the new container passes its health probe. Keeps state in one place and makes "deploy only goes live when healthy" enforceable from a single component.</div>
+
+<h2>The invariants — if you remember nothing else</h2>
+<table>
+<tr><th>Invariant</th><th>Where it lives</th></tr>
+<tr><td><strong>State ownership:</strong> the worker writes deployment status transitions after a job starts; the API only writes on request handling (create/upload sets <code>queued</code> + project <code>deploying</code>).</td><td><span class="path">services/api/src/projects/deployments.service.ts</span> — <code>queueDeployment()</code> vs <span class="path">services/worker/internal/store/store.go</span> — <code>ClaimBuild/ClaimRun/MarkLive/MarkFailed</code></td></tr>
+<tr><td><strong><code>deployments.image_ref</code> is the only place an image reference lives.</strong></td><td><span class="path">services/worker/internal/build/railpack.go</span> — <code>imageTag()</code> builds <code>proj-&lt;id&gt;:&lt;deploymentId&gt;</code>; <code>store.MarkBuilt</code> writes it; run role reads it back via <code>LoadDeployment</code>.</td></tr>
+<tr><td><strong>Messages carry ids only</strong>; the worker always reloads full state from the DB.</td><td>Publishers: <span class="path">services/api/src/queue/publisher.service.ts</span>; consumers: <span class="path">services/worker/internal/build/build.go</span> — <code>Handle()</code></td></tr>
+<tr><td><strong>Only worker mounts docker.sock rw; traefik ro.</strong></td><td><span class="path">docker-compose.yml</span></td></tr>
+<tr><td><strong> Env var values AES-256-GCM encrypted; PORT / DATABASE_URL reserved.</strong></td><td><span class="path">services/api/src/common/crypto.ts</span> — <code>encrypt()</code> / <code>decrypt()</code>; <span class="path">services/api/src/projects/env.service.ts</span> — <code>RESERVED_KEYS</code></td></tr>
+</table>
+
+<footer>ZeroOps Teaching Workspace · references: <a href="deploy-lifecycle.html">deploy-lifecycle</a> · <a href="queue-topology.html">queue-topology</a> · <a href="api-map.html">api-map</a> · <a href="worker-map.html">worker-map</a> · <a href="glossary.html">glossary</a></footer>
+</body>
+</html>
