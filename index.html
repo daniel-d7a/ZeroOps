@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZeroOps — Teaching Workspace</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="assets/style.css">
+<script src="assets/ui.js" defer></script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace</div>
+<h1>ZeroOps, without getting lost</h1>
+
+<p class="text-lg opacity-80">A Railway-like hosting platform for student projects: sign up, create a project, upload a Node zip, optionally get Postgres, set env vars, get a live URL at <code>&lt;slug&gt;.localhost:8080</code>. These docs exist so you can navigate the codebase cold and explain it out loud.</p>
+
+<h2>Start here</h2>
+<div class="my-5 grid gap-4 sm:grid-cols-2">
+  <a class="card border border-base-300 bg-base-200 transition-colors hover:border-primary" href="lessons/0001-architecture-30000ft.html">
+    <div class="card-body p-5">
+      <div class="text-base font-semibold">Lesson 1 · The 30,000-ft tour</div>
+      <p class="m-0 text-sm opacity-70">The whole platform in one diagram: control plane, worker, edge — and a trace of one deploy. Starts with a 4-question self-check.</p>
+      <div class="mt-2 text-xs font-semibold text-primary">Open lesson →</div>
+    </div>
+  </a>
+  <a class="card border border-base-300 bg-base-200 transition-colors hover:border-primary" href="lessons/0002-finite-state-machine.html">
+    <div class="card-body p-5">
+      <div class="text-base font-semibold">Lesson 2 · Finite state machine</div>
+      <p class="m-0 text-sm opacity-70">Every deployment state, edge, and failure class — plus the exact branch in the code that causes each transition.</p>
+      <div class="mt-2 text-xs font-semibold text-primary">Open lesson →</div>
+    </div>
+  </a>
+</div>
+
+<h2>Reference library</h2>
+<p>Keep these open while reading code. Each diagram names the file and function that implements it.</p>
+<div class="my-4 grid gap-3 sm:grid-cols-2">
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="reference/architecture.html">
+    <div class="text-sm font-semibold">Architecture map</div>
+    <div class="text-xs opacity-65">Containers, three networks, routing rules, invariants</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="reference/deploy-lifecycle.html">
+    <div class="text-sm font-semibold">Deploy lifecycle</div>
+    <div class="text-xs opacity-65">Zip → build → container → route → live, branch by branch</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="reference/queue-topology.html">
+    <div class="text-sm font-semibold">Queue topology</div>
+    <div class="text-xs opacity-65">Retry ladder, dead queues, idempotency ledger</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="reference/api-map.html">
+    <div class="text-sm font-semibold">API map</div>
+    <div class="text-xs opacity-65">NestJS modules, routes, tables, config</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="reference/worker-map.html">
+    <div class="text-sm font-semibold">Worker map</div>
+    <div class="text-xs opacity-65">Go packages, store functions, role wiring</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="reference/glossary.html">
+    <div class="text-sm font-semibold">Glossary</div>
+    <div class="text-xs opacity-65">Terms to say exactly right</div>
+  </a>
+</div>
+
+<h2>How to use this workspace</h2>
+<ul>
+  <li><strong>Retrieve before rereading.</strong> Each lesson ends with a quiz — answer from memory, then check.</li>
+  <li><strong>Navigation is a lookup table:</strong> “where is X handled?” → search the reference page for the function name.</li>
+  <li><strong>Folders:</strong> <span class="path">services/api</span> decides, <span class="path">services/worker</span> acts, <span class="path">traefik</span> serves.</li>
+  <li><strong>Sidebar:</strong> hamburger on mobile, <kbd class="kbd kbd-sm">n</kbd> on desktop. Theme button switches dark/light.</li>
+</ul>
+
+<p class="mt-8 opacity-75">Mission: draw the architecture from memory and explain any invariant <em>and its why</em>. See <a href="MISSION.md">MISSION.md</a>.</p>
+
+<footer>Built from the repo itself · every claim links to real code · <a href="https://github.com/daniel-d7a/ZeroOps" target="_blank" rel="noopener">source</a></footer>
+</body>
+</html>
