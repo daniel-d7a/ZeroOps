@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lesson 1 — ZeroOps from 30,000 ft</title>
+<title>Lesson 1 — The platform in one view</title>
 <link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
 <link rel="stylesheet" href="../assets/style.css">
@@ -18,19 +18,19 @@
 <div class="brand">ZeroOps Teaching Workspace · Lesson 1</div>
 <div class="crumbs"><a href="../reference/architecture.html">architecture (reference)</a> · <a href="https://github.com/daniel-d7a/ZeroOps/blob/main/teach/MISSION.md" target="_blank" rel="noopener">MISSION ↗</a></div>
 
-<h1>Lesson 1: Cold-start the whole system in your head</h1>
-<p><strong>Win by the end:</strong> you can diagram the entire platform from memory and say, for every arrow, which file owns it.</p>
+<h1>Lesson 1: The platform in one view</h1>
+<p><strong>Objective:</strong> after this lesson, you can draw the platform from memory. You can also name the file that implements each arrow.</p>
 
-<h2>Why you keep getting lost</h2>
-<p>Not because it's big — because it has <strong>three planes</strong> that never talk directly:</p>
+<h2>Why the code is difficult to follow</h2>
+<p>The system is not large. It is difficult because it has <strong>three planes</strong>. The planes do not communicate directly:</p>
 <ol>
-  <li><strong>Decide</strong> (api + platform-db + rabbitmq) — "this deployment should exist"</li>
-  <li><strong>Do</strong> (worker + docker + buildkit) — "make it exist"</li>
-  <li><strong>Serve</strong> (traefik) — "let people reach it"</li>
+  <li><strong>Decide</strong> (API, platform DB, RabbitMQ). The API records that a deployment must exist.</li>
+  <li><strong>Do</strong> (worker, Docker, BuildKit). The worker makes the deployment exist.</li>
+  <li><strong>Serve</strong> (Traefik). Traefik lets users reach the app.</li>
 </ol>
-<p>Every "where the heck is this" moment is really "which plane am I in?"</p>
+<p>Most questions about the code are questions about the plane.</p>
 
-<h2>The one diagram</h2>
+<h2>The main diagram</h2>
 <div class="diagram">
 <pre class="mermaid">
 graph TD
@@ -47,57 +47,58 @@ graph TD
   WK -.->|"/dynamic/*.yml"| T
 </pre>
 </div>
-<p>Print this in your head forever: <span class="path">docker-compose.yml</span> is the diagram's source of truth; <span class="path">docker-compose.yml</span> labels = console routing; <span class="path">services/worker/internal/route/route.go</span> — <code>route.Writer.Write()</code> = student routing.</p>
+<p>Use this rule: <span class="path">docker-compose.yml</span> is the authoritative source for the diagram. Docker labels route the console. <code>route.Writer.Write()</code> in <span class="path">services/worker/internal/route/route.go</span> writes student routes.</p>
 
-<h2>Trace: what happens when you click "Deploy"</h2>
-<p>Follow these in order — one function each:</p>
+<h2>Trace: what happens when you click Deploy</h2>
+<p>These calls occur in this order. Each step is one function:</p>
 <ol>
-  <li><span class="path">services/web/src/api/client.ts</span> — <code>api()</code> sends POST /api/projects/:id/deployments (CSRF header included)</li>
-  <li><span class="path">services/api/src/projects/projects.controller.ts</span> — <code>upload()</code> → <code>DeploymentsService.uploadZip()</code></li>
-  <li><span class="path">services/api/src/projects/deployments.service.ts</span> — <code>queueDeployment()</code>: one tx = deployment row <em>queued</em> + project <em>deploying</em> → <span class="path">services/api/src/queue/publisher.service.ts</span> — <code>publishBuild()</code></li>
-  <li><span class="path">services/worker/internal/build/build.go</span> — <code>Handler.Handle()</code>: claim → unzip → railpack → MarkBuilt → publish run</li>
-  <li><span class="path">services/worker/internal/run/run.go</span> — <code>handleDeploy()</code>: network → container → probe → route file → <code>store.MarkLive()</code></li>
-  <li><span class="path">traefik/traefik.yml</span> file provider reads <code>/dynamic/proj-*.yml</code> → your URL answers</li>
+  <li><span class="path">services/web/src/api/client.ts</span> — <code>api()</code> sends POST /api/projects/:id/deployments. It includes the CSRF header.</li>
+  <li><span class="path">services/api/src/projects/projects.controller.ts</span> — <code>upload()</code> calls <code>DeploymentsService.uploadZip()</code>.</li>
+  <li><span class="path">services/api/src/projects/deployments.service.ts</span> — <code>queueDeployment()</code> uses one transaction. The transaction writes deployment <em>queued</em> and project <em>deploying</em>. Then <code>publishBuild()</code> in <span class="path">services/api/src/queue/publisher.service.ts</span> sends the message.</li>
+  <li><span class="path">services/worker/internal/build/build.go</span> — <code>Handler.Handle()</code> claims the job, unzips the source, runs Railpack, calls MarkBuilt, and publishes the run job.</li>
+  <li><span class="path">services/worker/internal/run/run.go</span> — <code>handleDeploy()</code> creates the network and container, runs the probe, writes the route file, and calls <code>store.MarkLive()</code>.</li>
+  <li><span class="path">traefik/traefik.yml</span> — the file provider reads <code>/dynamic/proj-*.yml</code>. The URL then answers.</li>
 </ol>
-<p><a href="../reference/deploy-lifecycle.html">Full annotated version →</a></p>
+<p><a href="../reference/deploy-lifecycle.html">See the full annotated trace →</a></p>
 
-<h2>Check yourself (retrieve before you look)</h2>
+<h2>Check your knowledge</h2>
+<p>Answer each question before you look at the answer.</p>
 <div id="q1"></div>
 <div id="q2"></div>
 <div id="q3"></div>
 <div id="q4"></div>
 
-<h2>What to explore next (pick one)</h2>
+<h2>Questions to explore (select one)</h2>
 <ul>
-  <li><em>"Where does health check live?"</em> → <span class="path">services/worker/internal/run/run.go</span> — <code>probe()</code>, <code>ProbeTCP()</code></li>
-  <li><em>"How does a build crash without losing the message?"</em> → <a href="../reference/queue-topology.html">queue-topology</a> + <span class="path">services/worker/cmd/worker/main.go</span> — <code>deliveryHandler</code></li>
-  <li><em>"How does a user see build logs?"</em> → "deploy_logs" + <span class="path">services/api/src/projects/deployments.service.ts</span> — <code>listLogs()</code> (paginated, bigserial cursor)</li>
+  <li><em>“Where is the health probe?”</em> → <span class="path">services/worker/internal/run/run.go</span> — <code>probe()</code>, <code>ProbeTCP()</code></li>
+  <li><em>“How does a build crash without a lost message?”</em> → <a href="../reference/queue-topology.html">queue topology</a> and <span class="path">services/worker/cmd/worker/main.go</span> — <code>deliveryHandler</code></li>
+  <li><em>“How does a user see build logs?”</em> → “deploy_logs” and <span class="path">services/api/src/projects/deployments.service.ts</span> — <code>listLogs()</code> (paged with a bigserial cursor)</li>
 </ul>
 
-<p><em>Stuck on something? <strong>Ask your agent-teacher in chat</strong> — that's the feedback loop.</em></p>
+<p><em>If you have a question, ask your teacher in chat.</em></p>
 
-<footer>Next lesson: trace env-var encryption end-to-end (API encrypt → DB → worker decrypt → container env). See <a href="../reference/api-map.html">api-map</a> § Env first.</footer>
+<footer>Next lesson: follow environment variable encryption from the API to the container. See <a href="../reference/api-map.html">api-map</a>, section Env.</footer>
 
 <script>
   renderQuiz(document.getElementById('q1'), [
-    { q: "Which plane manufactures the container?",
-      options: ["api + partner plane", "decide plane", "do (worker+docker) plane", "serve (traefik) plane"],
-      answer: 2, why: "worker-role build/run is the only thing touching docker.sock; buildkit builds images." }
+    { q: "Which plane creates the container?",
+      options: ["API and platform plane", "decide plane", "do plane (worker and Docker)", "serve plane (Traefik)"],
+      answer: 2, why: "Only the build and run roles use the Docker socket. BuildKit builds images." }
   ]);
   renderQuiz(document.getElementById('q2'), [
-    { q: "Who writes deployments.status = building first?",
-      options: ["store.ClaimBuild (worker)", "queueDeployment (api)", "publishBuild (api)", "runRailpack (worker)"],
-      answer: 0, why: "the API only ever writes 'queued' past insert; claim is the worker's first transition." },
+    { q: "Which function writes deployments.status = building first?",
+      options: ["store.ClaimBuild (worker)", "queueDeployment (API)", "publishBuild (API)", "runRailpack (worker)"],
+      answer: 0, why: "The API writes only queued after insert. The claim is the first worker transition." },
   ]);
   renderQuiz(document.getElementById('q3'), [
-    { q: "A student app becomes reachable via…",
-      options: ["docker expose metadata", "traefik provider file", "a docker label on it", "the api proxying"],
-      answer: 1, why: "file provider /dynamic/proj-*.yml written by route.Writer.Write(); student containers carry NO labels." },
+    { q: "How does a student app become reachable?",
+      options: ["Docker expose metadata", "Traefik file provider", "a Docker label on the app", "the API proxy"],
+      answer: 1, why: "The worker writes /dynamic/proj-*.yml with route.Writer.Write(). Student containers have no labels." },
   ]);
   renderQuiz(document.getElementById('q4'), [
-    { q: "After MarkBuilt, deployments.image_ref equals…",
-      options: ["proj-{id}:{deploymentId}", "r{and(randomChars)}", "slug.localhost:8080", "sha256 of zip"],
-      answer: 0, why: "proj-<projectId>:<deploymentId>, built in railpack.go imageTag(), the only construction site." },
+    { q: "After MarkBuilt, what is deployments.image_ref?",
+      options: ["proj-{id}:{deploymentId}", "r{and(randomChars)}", "slug.localhost:8080", "sha256 of the zip"],
+      answer: 0, why: "It is proj-<projectId>:<deploymentId>. railpack.go imageTag() is the only function that creates it." },
   ]);
 </script>
 

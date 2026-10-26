@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 5 — One authenticated request</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 5</div>
+<div class="crumbs"><a href="0004-run-to-route.html">lesson 4</a> · <a href="0006-secrets-and-databases.html">lesson 6</a> · <a href="../reference/api-map.html">api-map (reference)</a></div>
+
+<h1>Lesson 5: One authenticated request</h1>
+<p><strong>Objective:</strong> after this lesson, you can follow a console request through Traefik, session middleware, CSRF, role checks, validation, and ownership. You can also explain each rejection as 401, 403, or a deliberate 404.</p>
+
+<h2>The request path</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  B["Browser on console.localhost:8080"] --> T{"Traefik<br>Host console.localhost"}
+  T -->|"PathPrefix /api"| A["api container :3000"]
+  T -->|"everything else"| W["web container / Caddy<br>SPA fallback"]
+  A --> SM["express-session + connect-pg-simple<br>cookie: httpOnly, SameSite=Lax, rolling 7d"]
+  SM --> TH["ThrottlerGuard — global<br>100/min default, 10/min login+register"]
+  TH --> CS["CsrfGuard — global<br>state-changing + session cookie"]
+  CS --> SG["SessionGuard — per controller<br>live uid + absolute 30d cap"]
+  SG --> RG["RolesGuard — admin routes<br>role read from the DB"]
+  RG --> VP["ValidationPipe whitelist + transform"]
+  VP --> OW["service: ownership 404-not-403<br>quotas, reserved names"]
+  OW --> R["JSON response<br>no CORS anywhere"]
+</pre>
+</div>
+
+<h2>1 · The same-origin boundary starts at Traefik</h2>
+<p>ZeroOps has no CORS middleware because it has no cross-origin API. Traefik has two Docker-provider routers on the <code>console.localhost</code> host:</p>
+<table>
+<tr><th>Rule</th><th>Target</th><th>Result</th></tr>
+<tr><td><code>Host(console.localhost) &amp;&amp; PathPrefix('/api')</code></td><td><code>api:3000</code></td><td>API calls have the same origin as the console. The browser sends the session cookie automatically.</td></tr>
+<tr><td><code>Host(console.localhost)</code></td><td><code>web:80</code> (dev: 5173)</td><td>All other paths use the static SPA. Caddy serves <code>index.html</code> for an unknown path.</td></tr>
+</table>
+<p>A cross-origin attacker can send the cookie, but cannot read the CSRF token. The attacker also cannot set a custom header because the server never allows the preflight request. Thus the double-submit CSRF design works without CORS.</p>
+
+<h2>2 · Sessions: cookie, store, and two time limits</h2>
+<p>Session data is in Postgres, not in the cookie. The cookie contains only the session id.</p>
+<table>
+<tr><th>Setting</th><th>Value</th><th>Reason</th></tr>
+<tr><td>Cookie</td><td><code>httpOnly</code>, <code>SameSite=Lax</code>, <code>secure: auto</code></td><td>JavaScript cannot read the cookie. A cross-site POST does not send it. Secure becomes active when the request uses HTTPS.</td></tr>
+<tr><td>Rolling idle timeout</td><td>7 days, refreshed on each request</td><td>An active user stays signed in.</td></tr>
+<tr><td>Absolute cap</td><td>30 days from <code>startedAt</code></td><td><code>SessionGuard</code> destroys the session after 30 days, even when the session is active.</td></tr>
+<tr><td>Store</td><td><code>sessions</code> table through connect-pg-simple</td><td>The session survives an API restart and is shared by API replicas.</td></tr>
+<tr><td>Trust proxy</td><td><code>1</code></td><td>There is one Traefik hop. Rate limiting sees the real client IP, not the IP of Traefik.</td></tr>
+</table>
+
+<h3>Login and registration details</h3>
+<ul>
+<li><strong>argon2id</strong> hashing (<code>@node-rs/argon2</code>).</li>
+<li><strong>Timing parity:</strong> the code checks a missing email against a dummy hash. Registration hashes the password before the duplicate check. Both paths have the same cost, so response time does not reveal registered users.</li>
+<li><strong>Session fixation:</strong> login calls <code>req.session.regenerate()</code> before it writes the uid. Then it creates a new 32-byte CSRF token. Code must use <code>req.session</code> after regeneration. A captured pre-login id is useless.</li>
+<li><strong>Disabled accounts:</strong> login returns 403. <code>/auth/me</code> destroys the session if the user became disabled after login.</li>
+<li><strong>Self-healing token:</strong> <code>/auth/me</code> creates a CSRF token for an old session that does not have the field.</li>
+</ul>
+
+<h2>3 · CSRF: the global guard for state changes</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  R["request"] --> M{"GET / HEAD / OPTIONS?"}
+  M -->|"yes"| PASS["pass"]
+  M -->|"no"| U{"session has uid?"}
+  U -->|"no"| PASS
+  U -->|"yes"| H{"X-CSRF-Token equals<br>session.csrf in constant time?"}
+  H -->|"yes"| PASS
+  H -->|"no"| F["403 invalid CSRF token"]
+</pre>
+</div>
+<p><code>CsrfGuard</code> runs for all requests. An anonymous state-changing request passes the guard. It then stops at <code>SessionGuard</code> on the controller with 401. The comparison uses <code>timingSafeEqual</code>, so a token match does not leak prefix timing.</p>
+<p>The console keeps the token in memory. <code>login</code> and <code>/auth/me</code> return <code>csrfToken</code>. The fetch wrapper sends <code>x-csrf-token</code>. The XHR upload path does the same because fetch cannot report upload progress.</p>
+
+<h2>4 · Guards and the 401 / 403 / 404 ladder</h2>
+<table>
+<tr><th>Check</th><th>Failure</th><th>Location</th></tr>
+<tr><td>No live session</td><td><strong>401</strong></td><td><code>SessionGuard</code> on each protected controller</td></tr>
+<tr><td>Session is past the absolute cap</td><td><strong>401</strong>. The session is destroyed.</td><td><code>SessionGuard</code></td></tr>
+<tr><td>A session-backed write has no valid CSRF token</td><td><strong>403</strong></td><td><code>CsrfGuard</code></td></tr>
+<tr><td>The user is not an admin</td><td><strong>403</strong></td><td><code>RolesGuard</code>. It reads the role from the DB, so a role change applies immediately.</td></tr>
+<tr><td>The project belongs to another user or does not exist</td><td><strong>404</strong>, deliberately not 403</td><td><code>ProjectsService.get</code>, <code>DeploymentsService.assertOwned</code>, env service</td></tr>
+<tr><td>The user reached a quota, used a duplicate slug, or has an open action</td><td><strong>403 or 409</strong></td><td>services</td></tr>
+<tr><td>Malformed body or bad UUID</td><td><strong>400</strong></td><td>global <code>ValidationPipe</code>, <code>ParseUUIDPipe</code></td></tr>
+</table>
+<div class="invariant"><strong>Use 404, not 403, for the resources of other users.</strong> A 403 confirms that the id exists and belongs to somebody. A 404 keeps the existence of the resource private. Admin routes read any resource and use the role guard instead.</div>
+
+<p>All protected routes are in <a href="../reference/api-map.html">api-map</a>. The pattern is consistent:</p>
+<pre><code>POST   /api/auth/register        public, throttled 10/min
+POST   /api/auth/login           public, throttled 10/min
+GET    /api/auth/me              SessionGuard
+GET    /api/projects             SessionGuard
+POST   /api/projects             SessionGuard + CSRF
+POST   /api/projects/:id/deployments   SessionGuard + CSRF + multipart
+GET    /api/projects/:id         SessionGuard + ownership
+GET    /api/admin/users          SessionGuard + RolesGuard(admin)</code></pre>
+
+<h2>5 · The console applies the same rules, but not as security</h2>
+<p>The Vue router guards improve the user experience. They are not security:</p>
+<ul>
+<li>A <code>beforeEach</code> reads <code>['me']</code> through TanStack Query. An unauthenticated navigation redirects to <code>/login?redirect=…</code>.</li>
+<li><code>requiresAdmin</code> prevents the render of an admin page for a non-admin. The API <code>RolesGuard</code> is the real enforcement.</li>
+<li>The session cookie is <code>httpOnly</code>. The client never stores the session token. It stores only the CSRF token in memory.</li>
+<li>Every fetch sets <code>credentials: 'include'</code> explicitly, although requests are same-origin. This documents the intent.</li>
+</ul>
+
+<h2>Speaking exercise (60 seconds)</h2>
+<ol>
+<li>“Traefik sends <code>/api</code> on the console host to the API. It sends all other paths to the SPA. Thus there is no CORS.”</li>
+<li>“The session is a Postgres-backed httpOnly cookie. It has a 7-day rolling idle timeout and a 30-day absolute cap.”</li>
+<li>“Global throttling and CSRF run first. Protected controllers add SessionGuard. Admin routes add RolesGuard, which reads the role from the DB.”</li>
+<li>“Services enforce ownership with 404, not 403. They check quotas and reserved names before they touch the DB.”</li>
+</ol>
+
+<h2>Quiz: answer from memory</h2>
+<div data-quiz='[
+{"q":"Why is there no CORS configuration?","options":["NestJS disables CORS by default.","The console and the API have the same origin under console.localhost.","The API accepts only JSON.","Traefik removes the Origin header."],
+ "answer":1,"why":"Traefik routes both /api and the SPA on the same host, so the browser treats each call as same-origin."},
+{"q":"A logged-in user sends a POST without X-CSRF-Token. Which layer rejects it, and with what code?","options":["SessionGuard, 401","CsrfGuard, 403","RolesGuard, 403","ValidationPipe, 400"],
+ "answer":1,"why":"CsrfGuard runs globally and rejects a session-backed state-changing request with 403."},
+{"q":"Why does login call session.regenerate()?","options":["to refresh the CSRF token only","to prevent session fixation with a new id","to write the user role into the cookie","to clear the Postgres session table"],
+ "answer":1,"why":"A pre-login session id must not become an authenticated id. regenerate swaps it before the code writes the uid."},
+{"q":"What does a request for another user’s project return?","options":["403 forbidden","404 not found","401 unauthorized","409 conflict"],
+ "answer":1,"why":"The AGENTS invariant is to not reveal existence. An ownership failure is indistinguishable from a missing resource."},
+{"q":"Where does the system enforce the admin role?","options":["Vue router guard","the JWT claims","RolesGuard reading users.role from the DB","Traefik middleware"],
+ "answer":2,"why":"The router guard is UX only. The API reads the current role from the database, so a revocation applies immediately."}
+]'></div>
+
+<h2>Next lesson</h2>
+<p>Next: <a href="0006-secrets-and-databases.html">Lesson 6</a>. It shows what happens to the values that these authenticated requests write.</p>
+
+<footer>Source files: <span class="path">services/api/src/main.ts</span>, <span class="path">services/api/src/app.module.ts</span>, <span class="path">services/api/src/auth/*</span>, <span class="path">services/api/src/common/roles.guard.ts</span>, <span class="path">services/api/src/projects/projects.service.ts</span>, <span class="path">services/web/src/api/client.ts</span>, <span class="path">services/web/src/router/index.ts</span>, <span class="path">docker-compose.yml</span> (Traefik labels).</footer>
+</body>
+</html>

@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 — From run to route</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 4</div>
+<div class="crumbs"><a href="0003-upload-to-build.html">lesson 3</a> · <a href="0005-auth-request-path.html">lesson 5</a> · <a href="../reference/deploy-lifecycle.html">deploy-lifecycle (reference)</a></div>
+
+<h1>Lesson 4: From run to route</h1>
+<p><strong>Objective:</strong> after this lesson, you can follow the deployment cutover in order. You can explain what happens when a new container fails its probe. You can also explain why a student container has no Traefik labels and cannot reach another project.</p>
+
+<h2>The deployment path</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  P["build role publishes run.x<br>routing key = node-1"] --> Q["run.node-1.q"]
+  Q --> H["run.Handle → handleDeploy<br>ids only, reload everything"]
+  H --> L["Store.LoadDeployment<br>projectId, slug, imageRef, wantsDb"]
+  L --> LK["Store.TryProjectLock<br>serializes deploy vs actions"]
+  LK --> CAP["Docker.RunningStudentContainers<br>capacity guard"]
+  CAP --> CL["Store.ClaimRun<br>built → starting"]
+  CL --> DB{"wantsDb?"}
+  DB -->|"yes"| PR["provision.Ensure<br>role + database + CONNECT revoke"]
+  DB -->|"no"| RC
+  PR --> RC["replaceContainer"]
+  RC --> NET["EnsureProjectNetwork<br>net-projectId"]
+  NET --> TJ["Connect traefik (+ student-db)<br>idempotent"]
+  TJ --> ENV["containerEnv<br>decrypt vars, PORT=3000, DATABASE_URL"]
+  ENV --> RUN["Docker.RunStudent<br>limits, labels, own network"]
+  RUN --> PB["probe: join network, dial :3000<br>60 s"]
+  PB -->|"fail"| RM["remove new container<br>old route untouched"]
+  PB -->|"pass"| RW["route.Writer.Write<br>temp file + rename"]
+  RW --> OLD["remove old project containers<br>log-only if it fails"]
+  OLD --> ML["Store.MarkLive — one tx<br>live + previous superseded + project running"]
+  ML --> IMG["prune old images<br>keep live + previous"]
+</pre>
+</div>
+
+<h2>Before a container: lock, capacity, and claim</h2>
+<table>
+<tr><th>Step</th><th>Reason</th><th>Code</th></tr>
+<tr><td>Advisory project lock</td><td>A stop action must not occur at the same time as a deploy for the same project. A busy lock is <em>transient</em>. The retry TTL is the backoff.</td><td><span class="path">services/worker/internal/store/store.go</span> — <code>TryProjectLock()</code></td></tr>
+<tr><td>Capacity check</td><td>At <code>MAX_RUNNING_PER_NODE</code>, a retry meets the same limit. The check is permanent and occurs <em>before</em> the claim. The system does not create an orphan <code>starting</code> row.</td><td><code>Docker.RunningStudentContainers()</code>. The compose default is 50.</td></tr>
+<tr><td>Claim</td><td>The CAS moves <code>built → starting</code>. It can steal a row with a heartbeat older than 2 minutes. A duplicate delivery bounces with the same attempt while the owner has a fresh heartbeat.</td><td><code>ClaimRun()</code></td></tr>
+<tr><td>Database first</td><td>The role and database must exist before the container starts and receives <code>DATABASE_URL</code>. An error releases the row to <code>built</code>, not <code>starting</code>.</td><td><code>provision.Ensure()</code></td></tr>
+</table>
+
+<h2>The four operations in <code>replaceContainer</code></h2>
+
+<h3>1 · Network isolation is structural</h3>
+<ul>
+<li><code>EnsureProjectNetwork</code> creates <code>net-&lt;projectId&gt;</code> with the label <code>platform.project</code>. The operation is idempotent.</li>
+<li>Traefik joins that network and resolves the container by name. If the project has a database, <code>student-db</code> joins the network too. The app reaches the database at the fixed hostname <code>student-db</code>.</li>
+<li>The student container joins <strong>only</strong> that network. It never joins <code>platform</code>, <code>edge</code>, or <code>db</code>. Two projects are isolated because they never share a network.</li>
+</ul>
+
+<h3>2 · The container has limits by default</h3>
+<table>
+<tr><th>Control</th><th>Value</th><th>Reason</th></tr>
+<tr><td>CPU, memory, and swap</td><td>0.5 CPU, 1 GiB, swap = memory</td><td>A student app cannot starve the host. No swap means the memory limit is a real limit.</td></tr>
+<tr><td>PIDs</td><td>256</td><td>Fork-bomb guard.</td></tr>
+<tr><td>Restart policy</td><td><code>on-failure:5</code></td><td>A crash recovers a few times. A manual stop does not restart.</td></tr>
+<tr><td>Log driver</td><td>json-file, 10 MB × 3</td><td>The disk use per container is bounded.</td></tr>
+<tr><td><code>no-new-privileges</code></td><td>set</td><td>Privilege escalation guard. Phase 3 still needs a non-root user, all capabilities dropped, and a read-only rootfs.</td></tr>
+<tr><td>Labels</td><td><code>platform.project</code>, <code>platform.deployment</code></td><td>These labels support lifecycle and cleanup only. There are <strong>no Traefik labels</strong>.</td></tr>
+</table>
+<p>The worker loads the environment each time it creates a container. It decrypts the user variables, then adds <code>PORT=3000</code>, then adds <code>DATABASE_URL</code> when the project has a database. Thus a restart applies changed environment variables, and a running container keeps its old values. The values go directly into the container spec. The system never logs them.</p>
+
+<h3>3 · The health probe is a real gate</h3>
+<p>The worker is not on the student network. It cannot dial the app by name from its own interfaces. <code>JoinForProbe</code> attaches the worker temporarily. The worker dials <code>&lt;container&gt;:3000</code> until the app accepts TCP or 60 seconds pass. Then the worker disconnects with a new context because the job context may be cancelled.</p>
+<div class="invariant"><strong>A failed probe removes only the new container.</strong> The old container and its route file do not change. Thus a broken deployment never takes the live site down. This is the difference between a failed deployment and an outage.</div>
+
+<h3>4 · Routing uses a file, and the cutover uses a rename</h3>
+<p>Traefik uses two providers:</p>
+<ul>
+<li><strong>Docker provider</strong> for platform services. <code>exposedByDefault=false</code>. Only <code>api</code> and <code>web</code> have labels.</li>
+<li><strong>File provider</strong> for student apps. The worker writes <code>/dynamic/proj-&lt;projectId&gt;.yml</code>. The file has one router and one service per project and points to <code>http://app-&lt;deploymentId&gt;:3000</code>.</li>
+</ul>
+<p>The writer writes <code>proj-&lt;id&gt;.yml.tmp</code> and renames it to the final name. Rename is atomic on the shared volume. Traefik never reads a partial file. The worker writes the route only after the probe passes. Traffic switches in one step, and the old route stays until then.</p>
+
+<div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  participant W as run worker
+  participant D as Docker
+  participant T as Traefik
+  participant U as user browser
+  W->>D: create app-new on net-project
+  W->>D: attach worker for probe
+  W->>D: dial app-new:3000 until accept
+  D-->>W: TCP accepted
+  W->>D: detach worker
+  W->>T: write proj-id.yml.tmp then rename
+  T-->>T: watch /dynamic, load router
+  U->>T: GET slug.localhost:8080
+  T->>D: proxy to app-new:3000
+  W->>D: remove app-old, keep route on new
+</pre>
+</div>
+
+<h2>Finish: one transaction, then cleanup</h2>
+<p><code>MarkLive</code> is one transaction:</p>
+<ol>
+<li>CAS <code>this deployment: starting, worker = me → live</code>.</li>
+<li>Set the previous live deployment to <code>superseded</code> in the same project.</li>
+<li>Set the project to <code>running</code> with <code>current_deployment_id = this</code>.</li>
+</ol>
+<p>Thus the console cannot show two live deployments. It cannot show a running project with a deployment that is not live. After the transaction, the worker prunes old images. It keeps the live image and the previous image because a restart of the superseded deployment needs its image. A prune failure writes a log entry. It does not fail the deployment.</p>
+
+<h2>Actions: stop, start, and restart</h2>
+<table>
+<tr><th>Action</th><th>Order</th><th>Reason</th></tr>
+<tr><td><strong>stop</strong></td><td><code>route.Delete</code> → stop containers (10 s grace) → project <code>stopped</code> + <code>desired_state=stopped</code></td><td>The URL stops before the compute. There is no 502 window. Docker’s restart policy does not undo a manual stop.</td></tr>
+<tr><td><strong>start</strong></td><td>Reuse the stopped container if it exists → create or verify the network and Traefik, probe, write route. If the container does not exist, rebuild with <code>replaceContainer</code>.</td><td>The fast path does not rebuild. A pruned container still has its image.</td></tr>
+<tr><td><strong>restart</strong></td><td>Always use <code>replaceContainer</code> from <code>image_ref</code>, then set the project to <code>running</code>.</td><td>The worker recreates the container with new environment variables. A short downtime is accepted (plan §8.3.4).</td></tr>
+</table>
+<p>All three actions use the same per-project lock, action claim, and transient ladder. If a dead worker leaves an action row in <code>running</code>, a redelivery runs the action again. The open-action index does not stay blocked. See <a href="0007-reliability-and-gaps.html">Lesson 7</a>.</p>
+
+<h2>Recovery cases to remember</h2>
+<table>
+<tr><th>Situation</th><th>Code behavior</th></tr>
+<tr><td>A new deployment fails its probe.</td><td>The worker removes the new container. The old container and route do not change. The deployment becomes <code>failed</code>.</td></tr>
+<tr><td>The worker crashes after the route write and before MarkLive.</td><td>A redelivery steals the claim after the heartbeat window and runs the cutover again. The route write is idempotent.</td></tr>
+<tr><td>Old-container cleanup fails.</td><td>The system writes a log entry only. The app is already live. A retry would probe and reroute again, which is worse.</td></tr>
+<tr><td>The image is missing at run time.</td><td>Permanent <code>ErrImageMissing</code> → “use Redeploy”. A retry cannot create the image.</td></tr>
+<tr><td>Traefik is down during a deployment.</td><td>The container is on <code>net-project</code>, but Traefik does not read the route file. The probe still passes and the worker writes the route. The URL starts to work when Traefik returns. Platform routing is a single point of failure.</td></tr>
+</table>
+
+<h2>Quiz: answer from memory</h2>
+<div data-quiz='[
+{"q":"Which networks can a student container join?","options":["platform and edge","only net-projectId","db and platform","any network that it names"],
+ "answer":1,"why":"The run role creates the container and attaches it to net-<projectId> only. student-db and Traefik join that network instead."},
+{"q":"A new container fails its TCP probe. What happens to the old version?","options":["It is removed with the new container.","It keeps serving on its old route.","It is stopped until the problem is fixed.","It becomes superseded immediately."],
+ "answer":1,"why":"The worker removes only the new container. The old container and route file do not change, so the deployment fails without downtime."},
+{"q":"Why does the worker join the project network temporarily?","options":["to write Traefik labels","to probe the app by container name","to mount the Docker socket","to provision the database"],
+ "answer":1,"why":"The worker is not on the student network. JoinForProbe lets it dial app-<id>:3000 from inside that network."},
+{"q":"When does the worker write the route file?","options":["before the container starts","after the probe passes","inside MarkLive","when the build finishes"],
+ "answer":1,"why":"Routing switches only after the new container answers. Thus a failed deployment never takes the live URL down."},
+{"q":"What does MarkLive do in one transaction?","options":["It writes the image and the route.","It marks the deployment live, supersedes the previous deployment, and changes the project state.","It starts the container and probes it.","It deletes old images."],
+ "answer":1,"why":"One transaction covers all three rows. The worker prunes images afterwards, and a prune error never fails the deployment."}
+]'></div>
+
+<h2>Next lesson</h2>
+<p>Next: <a href="0005-auth-request-path.html">Lesson 5</a>. It covers the trust boundary in front of each API call. For the full branch list of this path, use <a href="../reference/deploy-lifecycle.html">deploy-lifecycle</a>.</p>
+
+<footer>Source files: <span class="path">services/worker/internal/run/run.go</span>, <span class="path">services/worker/internal/docker/docker.go</span>, <span class="path">services/worker/internal/route/route.go</span>, <span class="path">services/worker/internal/store/store.go</span> (<code>ClaimRun</code>, <code>MarkLive</code>, <code>SetProjectState</code>), <span class="path">traefik/traefik.yml</span>, <span class="path">docker-compose.yml</span>.</footer>
+</body>
+</html>

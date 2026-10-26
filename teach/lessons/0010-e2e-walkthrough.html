@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 10 — The end-to-end test suite</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 10</div>
+<div class="crumbs"><a href="0009-infrastructure.html">lesson 9</a> · <a href="0011-capstone.html">capstone</a> · <a href="../reference/deploy-lifecycle.html">deploy-lifecycle (reference)</a></div>
+
+<h1>Lesson 10: The end-to-end test suite</h1>
+<p><strong>Objective:</strong> after this lesson, you can select one of the 17 scenarios and name the invariant it proves. You can name the files that implement the invariant, and you can add a scenario without damage to the suite.</p>
+
+<h2>What the suite is</h2>
+<p>The suite is black-box. It operates the running stack over HTTP as a browser does, including the <code>console.localhost</code> host header and CSRF. It also inspects Docker, Postgres, and RabbitMQ when a behavior is not visible from outside. It is not a unit test suite. It does not mock the platform.</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  R["scripts/e2e.sh"] --> L{"--list or name filters?"}
+  L -->|"--list"| LIST["print 17 scenarios"]
+  L -->|"default"| ALL["all scripts/e2e/[0-9]*.sh in order"]
+  L -->|"names"| SUB["substring match, run selected"]
+  ALL --> CL1["cleanup before round"]
+  SUB --> CL1
+  CL1 --> EACH["for each file: bash NN-name.sh"]
+  EACH --> ONE["source common.sh<br>reset network/container state before and after"]
+  ONE --> ASSERT["assertions bump PASS or FAIL"]
+  EACH --> CL2["cleanup after each file"]
+  CL2 --> SUM["summary · nonzero exit on any failure"]
+</pre>
+</div>
+
+<h2>The shared harness (<code>scripts/e2e/common.sh</code>)</h2>
+<table>
+<tr><th>Helper</th><th>Function</th></tr>
+<tr><td><code>say</code>, <code>ok</code>, <code>bad</code>, <code>finish</code></td><td>They print one indented line for each check, count pass and fail, and return an exit code.</td></tr>
+<tr><td><code>assert_code</code>, <code>assert_contains</code>, <code>assert_eq</code></td><td>Small assertions with a 240-byte body excerpt on failure.</td></tr>
+<tr><td><code>wait_for</code></td><td>It calls a shell function each second until a deadline. Each asynchronous status uses it.</td></tr>
+<tr><td><code>req</code>, <code>reqj</code>, <code>app_req</code></td><td>curl wrappers that set <code>$CODE</code> and <code>$BODY</code>, keep the cookie jar, and attach CSRF.</td></tr>
+<tr><td><code>signup</code>, <code>as_user</code>, <code>login_user</code></td><td>Cookie jars and CSRF tokens for each user. They back off on 429 for the 10/min auth throttle.</td></tr>
+<tr><td><code>create_proj</code>, <code>upload</code>, <code>dep_is</code>, <code>proj_is</code>, <code>wait_action</code></td><td>They store new ids in <code>$NEW_PID</code> and <code>$NEW_DEP</code> and poll the console API.</td></tr>
+<tr><td><code>zip_dir</code>, <code>zip_slip_craft</code></td><td>They build fixture zips from source folders and create the hostile archive.</td></tr>
+<tr><td><code>compose</code></td><td>It detects the dev overlay by inspecting the API container mounts. The same suite runs against either stack.</td></tr>
+</table>
+<div class="invariant"><strong>Isolation discipline:</strong> each file gets a unique <code>RUN</code> suffix for emails and slugs. Cleanup runs before the round, after each file, and on exit. Without this, a full round of <code>net-*</code> networks empties Docker’s default network pool (about 30 bridges).</div>
+
+<h2>The 17 scenarios</h2>
+<table>
+<tr><th>File</th><th>Invariant it proves</th><th>Code it exercises</th></tr>
+<tr><td><code>01-hello-node</code></td><td>Upload → build → run → probe → route → live. The URL serves the expected body.</td><td>Happy path; <code>build.Handle</code>, <code>handleDeploy</code>, route file.</td></tr>
+<tr><td><code>02-node-with-db</code></td><td>The <code>/db</code> round trip works at the first deployment and after a redeploy. Rows survive. Provisioning is <code>ready</code>. A role from another project cannot connect.</td><td>M5 provisioning, <code>DATABASE_URL</code> injection, revoke PUBLIC, once-per-project skip.</td></tr>
+<tr><td><code>03-env-echo</code></td><td><code>GREETING</code> is visible after a restart, but not before. Environment changes need a new container.</td><td>Encrypted environment write and read, <code>containerEnv</code>, restart action.</td></tr>
+<tr><td><code>04-broken-build</code></td><td>It fails on the first attempt with an error and no retry-ladder delay.</td><td>Permanent build failure; Railpack exit code other than 0.</td></tr>
+<tr><td><code>05-no-listen</code></td><td>The new deployment fails its probe. The previous version still serves the same body. The current deployment id does not change.</td><td>“Failed deployment is not downtime”. The route is written only after the probe.</td></tr>
+<tr><td><code>06-memory-hog</code></td><td>The 1 GiB limit kills the memory hog. The platform and a neighbour app stay healthy.</td><td>Resource limits. No host starvation.</td></tr>
+<tr><td><code>07-zip-slip</code></td><td>The code rejects a traversal archive with a clear error.</td><td>Safe unzip preflight; permanent failure.</td></tr>
+<tr><td><code>08-net-probe</code></td><td>A project cannot reach another project’s app by hostname.</td><td><code>net-&lt;projectId&gt;</code> isolation.</td></tr>
+<tr><td><code>10-sessions</code></td><td>Login changes the session id. CSRF, access control, and input validation behave correctly.</td><td>Session fixation defense, CSRF guard, 404-not-403, validation.</td></tr>
+<tr><td><code>11-quotas</code></td><td>The third or fourth project and the 51st environment variable hit the limits. An over-limit request writes nothing.</td><td>Quota checks, reserved slugs, bulk validation.</td></tr>
+<tr><td><code>12-retention</code></td><td>The newest 5 sources remain. The live source remains. The code unlinks old files and soft-deletes their rows.</td><td>Retention during upload; file-before-row order.</td></tr>
+<tr><td><code>13-lifecycle</code></td><td>Stop removes the URL. Start restores it. Redeploy still works after the image was removed.</td><td><code>runAction</code> stop, start, and restart; route delete; image behavior.</td></tr>
+<tr><td><code>15-idempotency</code></td><td>Duplicate messages through the management API do not create duplicate work. The row settles one time.</td><td>Claim CAS, skip and ack, no double build.</td></tr>
+<tr><td><code>16-worker-kill</code></td><td>A sibling worker recovers from a worker killed mid-build. The deployment reaches live.</td><td>Manual ack, stale-heartbeat steal, worker restart policy.</td></tr>
+<tr><td><code>17-retry</code></td><td>With <code>FORCE_TRANSIENT=true</code>, three deliveries occur over at least 60 seconds. Then the job goes to the dead queue and the deployment fails.</td><td>Retry ladder, 30-second TTL, dead queue, give-up write.</td></tr>
+<tr><td><code>18-security</code></td><td>Only worker and traefik mount the socket. Only the expected ports are published. The student container has its own network. Environment values are ciphertext in the DB and never appear in logs. The repository has no tracked secrets.</td><td>Plan §10 checklist across compose and live state.</td></tr>
+<tr><td><code>19-replicas</code></td><td>Multiple worker replicas share the load and process projects in parallel without duplicate state.</td><td>Prefetch, competing consumers, claims across replicas.</td></tr>
+</table>
+
+<h2>How to run the suite</h2>
+<pre><code>scripts/e2e.sh                      # full suite, about 10 min
+scripts/e2e.sh --list               # names only
+scripts/e2e.sh retry                # substring match
+scripts/e2e.sh sessions quotas      # several names
+scripts/e2e.sh 05-no-listen         # one file</code></pre>
+<p>Before you run it, the stack must be up. <code>.env</code> must contain the platform secrets. Docker must reach the daemon. The runner resets student networks and containers, but it force-removes all <code>app-*</code> and <code>net-*</code> objects. Do not point it at a shared host until the cleanup uses a label filter.</p>
+
+<h2>Read a failure</h2>
+<ol>
+<li><strong><code>code=</code> is not the expected value:</strong> a request-level failure occurred before the worker. The causes are auth, ownership, or validation.</li>
+<li><strong><code>wait_for</code> times out:</strong> read the deployment row and the worker logs, not the UI. Use <code>docker compose logs api worker</code>.</li>
+<li><strong>The status is correct but the body is wrong:</strong> check routing or the app. Inspect the route file and the container labels and network.</li>
+<li><strong>Only a full round fails:</strong> the network address pool is empty or a container leaked. Run cleanup and retry the single file.</li>
+<li><strong>A timing assertion fails:</strong> the retry or dead-letter behavior changed. Check <code>MaxAttempts</code> and the TTL in <code>definitions.json</code>.</li>
+</ol>
+
+<h2>Exercise: add scenario 20</h2>
+<p>Select a behavior that the suite does not cover. One example is “bulk environment apply is all-or-nothing”. Write <code>scripts/e2e/20-bulk-env.sh</code>:</p>
+<ol>
+<li>Source <code>common.sh</code> and call <code>say</code> with a plan reference.</li>
+<li>Call <code>signup</code> and <code>create_proj</code>. Upload a fixture. If necessary, call <code>wait_for ... dep_is ... live</code>.</li>
+<li>Send one valid key and one invalid key through <code>PUT /api/projects/:id/env</code>.</li>
+<li>Assert 400. List the environment variables and assert that neither key was written.</li>
+<li>Call <code>finish</code>.</li>
+</ol>
+<p>Keep the assertions user-visible. The failure message must name what a user would see, not an internal function.</p>
+
+<h2>Quiz: answer from memory</h2>
+<div data-quiz='[
+{"q":"A scenario kills a worker mid-build. Which pair makes recovery possible?","options":["autoAck and a retry header","manual ack and a stale-heartbeat claim steal","SSE and polling","image pruning and route delete"],
+ "answer":1,"why":"Unacked messages return to the queue. The claim CAS steals the row when the heartbeat is stale."},
+{"q":"Why does the runner clean up after each file, not only at the end?","options":["to reset CSRF tokens","because Docker’s default address pool is small","to rebuild images","to clear RabbitMQ dead queues"],
+ "answer":1,"why":"A full round creates many net-* bridges. Per-file cleanup prevents pool exhaustion in the middle of a run."},
+{"q":"Which scenario proves that a failed deployment causes no downtime?","options":["04-broken-build","05-no-listen","06-memory-hog","13-lifecycle"],
+ "answer":1,"why":"The new container fails its probe while the previous version keeps serving the old body."},
+{"q":"What does 17-retry use to force the ladder?","options":["a hostile zip","FORCE_TRANSIENT=true on the worker","a dead RabbitMQ node","a missing image"],
+ "answer":1,"why":"The test hook makes each build delivery fail as transient, so the three-delivery ladder becomes visible."},
+{"q":"The suite also runs against the dev overlay. How does it detect the overlay?","options":["a flag in .env","it inspects the API container bind mounts","the port changes","it checks for Vite"],
+ "answer":1,"why":"common.sh inspects the API container mounts and adds docker-compose.dev.yml when the source tree is bind-mounted."}
+]'></div>
+
+<h2>Next lesson</h2>
+<p>Final lesson: <a href="0011-capstone.html">the capstone</a>. Explain the platform without notes and check yourself.</p>
+
+<footer>Source files: <span class="path">scripts/e2e.sh</span>, <span class="path">scripts/e2e/common.sh</span>, <span class="path">scripts/e2e/[0-9]*.sh</span>, <span class="path">scripts/e2e/cleanup.sh</span>, <span class="path">docs/FIXLIST.md</span> (verification section).</footer>
+</body>
+</html>

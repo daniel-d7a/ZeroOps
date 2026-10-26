@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 — Reliability and current gaps</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 7</div>
+<div class="crumbs"><a href="0006-secrets-and-databases.html">lesson 6</a> · <a href="0008-console-data-flow.html">lesson 8</a> · <a href="../reference/queue-topology.html">queue-topology (reference)</a></div>
+
+<h1>Lesson 7: Reliability and current gaps</h1>
+<p><strong>Objective:</strong> after this lesson, you can name the behavior for each crash point. The crash points are a killed worker, a broker outage, a DB outage, an unroutable publish, and a node reboot. You can also identify which behaviors are known gaps, not designed recovery.</p>
+<p class="text-sm opacity-75">State of this lesson: 2026-10-26. Phase 1 of <span class="path">docs/FIXLIST.md</span> is shipped. Phases 2 and 3 are not.</p>
+
+<h2>The ack contract is the safety net</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  D["RabbitMQ delivery<br>unacked, invisible to other consumers"] --> H["handler"]
+  H -->|"success"| DB["final DB write"]
+  DB --> A["ack"]
+  H -->|"transient"| R["release claim<br>publish retry (attempt+1)"]
+  R --> A
+  H -->|"3rd delivery"| DEAD["publish dead<br>mark failed in DB"]
+  DEAD --> A
+  H -->|"permanent"| FAIL["MarkFailed"]
+  FAIL --> A
+  H -->|"infrastructure error"| CRASH["return error → main exits"]
+  CRASH --> RQ["connection closes<br>unacked message requeues"]
+</pre>
+</div>
+<p>There is no separate recovery daemon for jobs. The broker keeps the unacked message. The DB row is the record. The worker acks only after the last write. If the worker crashes before the ack, the message returns, possibly to another replica.</p>
+<div class="invariant"><strong>Use this rule:</strong> “Message first, DB next, ack last.” On give-up, the broker confirms the retry or dead publish before the worker writes the failure and acks. Thus a failure never exists only in memory.</div>
+
+<h2>1 · Claims, steals, and busy bounces</h2>
+<p>Claims are the only mutual exclusion for jobs:</p>
+<ul>
+<li><code>ClaimBuild</code> and <code>ClaimRun</code> are single <code>UPDATE</code>s. Their <code>WHERE</code> clause matches only the allowed source state.</li>
+<li>The claim writes <code>worker_id</code> and <code>heartbeat_at</code>. After 2 minutes without a heartbeat, another replica can steal the job.</li>
+<li>A duplicate delivery while the owner is alive gets <code>claimed=false</code>. For <code>building</code> or <code>starting</code> with a fresh heartbeat, the worker publishes to the retry exchange with the <strong>same attempt</strong>. This is a wait, not a retry. It must not use the failure budget.</li>
+<li>Actions are different. They have no heartbeat column. A redelivered message for a row that is still <code>running</code> is executed again. The previous holder died with the message unacked, so this is the only way the broker can redeliver it. This prevents a permanent stop failure. The per-project lock keeps the effect small.</li>
+</ul>
+
+<h2>2 · The retry ladder</h2>
+<table>
+<tr><th>Delivery</th><th>Attempt header</th><th>On transient failure</th></tr>
+<tr><td>1st</td><td>0</td><td>Publish to the retry exchange with attempt 1.</td></tr>
+<tr><td>2nd</td><td>1</td><td>Publish with attempt 2.</td></tr>
+<tr><td>3rd</td><td>2</td><td>The next attempt would be 3. Publish to the dead queue, mark the row failed, and ack.</td></tr>
+</table>
+<p>Thus a transient job gets <strong>three deliveries, which is two retries</strong>. The retry queue has a 30-second TTL and dead-letters to the main exchange. RabbitMQ waits, not the worker. This matches plan §6. It conflicts with the “3×” wording in AGENTS.md. This is an open alignment item.</p>
+
+<h2>3 · Crash-point matrix (current behavior)</h2>
+<table>
+<tr><th>Crash or failure point</th><th>Current behavior</th><th>Recovery mechanism</th></tr>
+<tr><td>The worker is killed during a build.</td><td>The row stays <code>building</code>. The message is unacked and redelivered.</td><td>The redelivery waits for the 2-minute stale heartbeat, then steals the row and rebuilds. If the image exists, the worker skips Railpack.</td></tr>
+<tr><td>The worker stops after Railpack and before <code>MarkBuilt</code>.</td><td>The row is still <code>building</code>. The image exists on disk.</td><td>The claim steal and the <code>imageExists</code> repair path skip the build and write <code>image_ref</code>.</td></tr>
+<tr><td>The worker stops after <code>MarkBuilt</code> and before the deploy publish.</td><td>The row is <code>built</code> with no run message.</td><td>The redelivery sees <code>built</code> and publishes the deploy job again.</td></tr>
+<tr><td>The worker stops during a deployment after the route write.</td><td>The new container may be live and routed. The row is still <code>starting</code>.</td><td>The claim steal runs <code>replaceContainer</code> again. The route write and the attachment are idempotent. <code>MarkLive</code> then wins.</td></tr>
+<tr><td>The worker stops while an action is <code>running</code>.</td><td>The action row stays blocked. The API open-action index blocks a new action of the same type.</td><td>The redelivery executes the running action again. <code>FinishAction</code> can move it to a terminal state.</td></tr>
+<tr><td>The DB is down during a try/catch block.</td><td>The handler returns an error and the worker exits. The message requeues.</td><td>The worker restarts until the DB returns. No job is lost. The system does not report a false success.</td></tr>
+<tr><td>The broker is down at publish time.</td><td>The API upload publish throws. The deployment becomes failed, the project is restored, and the API returns 502.</td><td>The system does not leave a ghost <code>queued</code> row.</td></tr>
+<tr><td>The broker confirms the publish but cannot route it.</td><td><strong>Known gap:</strong> the broker returns the message, but the code writes only a log line. The publish resolves, so the row stays <code>queued</code> and compensation never runs.</td><td>None today. The fix is to throw on the <code>'return'</code> event (FIXLIST §2.3).</td></tr>
+<tr><td>The node reboots while a project should be running.</td><td><strong>Known gap:</strong> the container may be gone, but the row still says <code>running</code>. There is no reconcile at worker or API startup.</td><td>None today (M7.4 / plan §8.7). The user must press Start.</td></tr>
+<tr><td>The platform stack goes down.</td><td>Student containers are not compose services. They can survive as unreachable zombies.</td><td><code>scripts/down.sh</code> stops containers with the <code>platform.project</code> label. A plain <code>docker compose down</code> leaves them.</td></tr>
+<tr><td>Old-container cleanup fails after a good probe.</td><td>The new version is live and routed. The old container remains until the next cleanup.</td><td>The system writes a log entry only. This is deliberate. A retry would probe and reroute again.</td></tr>
+<tr><td>A build runs longer than 2 minutes.</td><td><strong>Known gap:</strong> the heartbeat is written once at claim time and is never refreshed.</td><td>None. An extra duplicate message can steal a live long build. The per-project lock limits the damage (backlog item).</td></tr>
+</table>
+
+<h2>4 · What Phase 1 changed</h2>
+<table>
+<tr><th>Fix</th><th>Commit</th><th>Previous behavior</th></tr>
+<tr><td>The UI polls project state every 2.5 seconds without a condition.</td><td><code>9a3b5ce</code></td><td>Polling stopped after a stop, start, or restart mutation. The “running” badge stayed stale until a reload.</td></tr>
+<tr><td>A redelivered <code>running</code> action executes again.</td><td><code>ef6ba82</code></td><td>A dead worker’s action row blocked stop, start, and restart forever with an open-action 409.</td></tr>
+<tr><td><code>scripts/down.sh</code> stops student apps.</td><td><code>4c59a8d</code></td><td><code>on-failure</code> restarted student containers after a daemon reboot, and the platform did not know.</td></tr>
+<tr><td>Log curation: 2 KB line clamp, 2,000-line tail, npm noise suppression, 1,000-line UI window, and terminal drain</td><td><code>11de4ee</code></td><td>Log storage and the DOM were unbounded. The final pull lost backlog after a terminal status change.</td></tr>
+</table>
+<p>Still open in Phase 1: the build-events “key-line” view, which extracts the primary error and warning. The log viewer shows the raw tail. The code curates it but does not summarize it.</p>
+
+<h2>5 · Gaps by phase</h2>
+
+<h3>Phase 2: missing capability</h3>
+<table>
+<tr><th>Gap</th><th>Current effect</th><th>Planned fix</th></tr>
+<tr><td>No SSE fanout. The console polls.</td><td>The lag can be several seconds. Each tab polls independently.</td><td>The worker publishes events to a fanout exchange. The API terminates SSE. Polling stays as a fallback.</td></tr>
+<tr><td>No runtime logs</td><td>The system stores only build and system lines. Student stdout goes to Docker’s json-file and is never read. It disappears on rebuild.</td><td><code>docker logs --follow</code> → events → SSE toggle. A runtime logs endpoint provides the historical tail.</td></tr>
+<tr><td>An unroutable publish writes only a log entry.</td><td>A topology or routing mistake causes a silent “queued forever” deployment.</td><td>Throw on the <code>'return'</code> event so compensation runs.</td></tr>
+<tr><td>No memory limits on platform services. No log rotation.</td><td>The platform is less constrained than the student containers that it guards. Platform logs can fill the host disk.</td><td><code>deploy.resources.limits</code> on each service. json-file <code>max-size</code> and <code>max-file</code>.</td></tr>
+</table>
+
+<h3>Phase 3: sandbox and concurrency</h3>
+<table>
+<tr><th>Gap</th><th>Current effect</th><th>Planned fix</th></tr>
+<tr><td>Student containers run as root with default capabilities.</td><td>A compromised app has more privilege than it needs.</td><td>A non-root user, <code>CapDrop: ALL</code>, a read-only rootfs, and default seccomp. Document the escape hatches.</td></tr>
+<tr><td>The build heartbeat is never refreshed.</td><td>A long build can be stolen. Two Railpack processes could use one work directory at the same time.</td><td>A heartbeat ticker during the build.</td></tr>
+<tr><td>A disabled user’s apps keep serving.</td><td>A banned user still has live apps.</td><td>Queue stop actions inside the disable transaction.</td></tr>
+<tr><td>Concurrent uploads use check-then-act.</td><td>Two uploads can both pass the “one in flight” check and create two active deployments.</td><td>A partial unique index as the DB arbiter.</td></tr>
+<tr><td>Quota races</td><td>Concurrent creates or variable writes can go over a limit.</td><td>DB constraints or an arbiter.</td></tr>
+</table>
+
+<h3>Backlog items</h3>
+<ul>
+<li><strong>Startup reconcile (M7.4):</strong> no code compares <code>desired_state=running</code> with the container state after a reboot.</li>
+<li><strong>BASE_DOMAIN drift:</strong> the Traefik console rules hardcode <code>console.localhost</code>. The worker builds student routes from <code>BASE_DOMAIN</code>. If one value changes and the other does not, half of the system breaks.</li>
+<li><strong>Retry wording drift:</strong> three deliveries and two retries, compared with “3×” in AGENTS.md.</li>
+<li><strong><code>deployments.container_name</code> and <code>attempt</code></strong> are unused columns. No code writes them. Remove them or populate them deliberately.</li>
+<li><strong>Upload orphan:</strong> if the code fails after the file rename, it unlinks the wrong path and leaves an orphan zip.</li>
+<li><strong>Route temp files</strong> are in Traefik’s watched directory (<code>.tmp</code>). This can cause parse flapping. Write them outside the watched directory or use an ignored prefix.</li>
+<li><strong>E2E cleanup</strong> force-removes all <code>app-*</code> containers and <code>net-*</code> networks. Add a label filter before it runs on a shared host.</li>
+</ul>
+
+<h2>Speaking exercise (60 seconds)</h2>
+<ol>
+<li>“Jobs are safe because the broker holds unacked messages. The worker acks only after the final DB write.”</li>
+<li>“Claims are CAS updates. A stale heartbeat permits a steal. A duplicate bounces with the same attempt while the owner is alive.”</li>
+<li>“Phase 1 fixed the incorrect behavior: polling, wedged actions, zombie student containers, and log growth.”</li>
+<li>“Known gaps are: no startup reconcile, no runtime logs or SSE, and an unroutable publish that only logs. The sandbox also uses root with default capabilities.”</li>
+</ol>
+
+<h2>Quiz: answer from memory</h2>
+<div data-quiz='[
+{"q":"How many retries does a transient job get before the dead queue?","options":["one","two","three","none"],
+ "answer":1,"why":"The deliveries have attempts 0, 1, and 2. The third failure gives up. Three deliveries, two retries."},
+{"q":"A duplicate build message arrives while the owner is alive with a fresh heartbeat. What happens?","options":["A second build runs.","The message is acked and dropped.","The retry exchange receives it with the same attempt.","The row is marked failed."],
+ "answer":2,"why":"This is a busy bounce. It waits for the steal window and does not use the retry budget."},
+{"q":"Why can the system now finish a running action after the worker is killed?","options":["Actions have a heartbeat column.","A redelivery executes a running action again.","The API cancels stale actions automatically.","RabbitMQ marks the action done."],
+ "answer":1,"why":"Only an unacked redelivery can leave a running row. Thus the worker can safely execute it again."},
+{"q":"A publish is confirmed but matches no queue. What is the current result?","options":["Compensation marks it failed.","The retry ladder starts.","It stays queued while the code writes only a log line.","The broker rejects the publish."],
+ "answer":2,"why":"This is the open FIXLIST §2.3 gap. The code logs the mandatory return, but the confirm still resolves."},
+{"q":"Which failure does scripts/down.sh prevent?","options":["student apps that survive a platform shutdown","builds that are stolen after 2 minutes","stale UI badges","unroutable publishes"],
+ "answer":0,"why":"Plain compose down never touches student containers because they are not compose services. down.sh stops the labelled containers."}
+]'></div>
+
+<h2>Next lesson</h2>
+<p>Next: <a href="0008-console-data-flow.html">Lesson 8</a>. It shows how the console turns these states into polling, logs, and buttons. For the full audit, read <a href="https://github.com/daniel-d7a/ZeroOps/blob/main/docs/FIXLIST.md" target="_blank" rel="noopener">docs/FIXLIST.md ↗</a>.</p>
+
+<footer>Source files: <span class="path">services/worker/internal/queue/queue.go</span>, <span class="path">services/worker/internal/store/store.go</span>, <span class="path">services/worker/cmd/worker/main.go</span>, <span class="path">services/worker/internal/run/run.go</span> (<code>actionSkip</code>), <span class="path">services/api/src/queue/publisher.service.ts</span>, <span class="path">scripts/down.sh</span>, <span class="path">docs/FIXLIST.md</span>, <span class="path">docs/milestones.md</span>.</footer>
+</body>
+</html>

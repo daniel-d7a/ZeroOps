@@ -11,25 +11,65 @@
 </head>
 <body>
 <div class="brand">ZeroOps Teaching Workspace</div>
-<h1>ZeroOps, without getting lost</h1>
+<h1>ZeroOps: a guided tour of the system</h1>
 
-<p class="text-lg opacity-80">A Railway-like hosting platform for student projects: sign up, create a project, upload a Node zip, optionally get Postgres, set env vars, get a live URL at <code>&lt;slug&gt;.localhost:8080</code>. These docs exist so you can navigate the codebase cold and explain it out loud.</p>
+<p class="text-lg opacity-80">A Railway-like hosting platform for student projects: sign up, create a project, upload a Node zip, optionally get Postgres, set env vars, get a live URL at <code>&lt;slug&gt;.localhost:8080</code>. These documents help you navigate the codebase without notes and explain it aloud.</p>
 
 <h2>Start here</h2>
 <div class="my-5 grid gap-4 sm:grid-cols-2">
   <a class="card border border-base-300 bg-base-200 transition-colors hover:border-primary" href="lessons/0001-architecture-30000ft.html">
     <div class="card-body p-5">
-      <div class="text-base font-semibold">Lesson 1 · The 30,000-ft tour</div>
-      <p class="m-0 text-sm opacity-70">The whole platform in one diagram: control plane, worker, edge — and a trace of one deploy. Starts with a 4-question self-check.</p>
+      <div class="text-base font-semibold">Lesson 1 · Platform overview</div>
+      <p class="m-0 text-sm opacity-70">The platform in one diagram: control plane, worker, and edge. It follows one deployment. It starts with a 4-question self-check.</p>
       <div class="mt-2 text-xs font-semibold text-primary">Open lesson →</div>
     </div>
   </a>
   <a class="card border border-base-300 bg-base-200 transition-colors hover:border-primary" href="lessons/0002-finite-state-machine.html">
     <div class="card-body p-5">
-      <div class="text-base font-semibold">Lesson 2 · Finite state machine</div>
-      <p class="m-0 text-sm opacity-70">Every deployment state, edge, and failure class — plus the exact branch in the code that causes each transition.</p>
+      <div class="text-base font-semibold">Lesson 2 · Deployment states and failure classes</div>
+      <p class="m-0 text-sm opacity-70">Each deployment state, transition, and failure class. It names the exact code branch that causes each transition.</p>
       <div class="mt-2 text-xs font-semibold text-primary">Open lesson →</div>
     </div>
+  </a>
+</div>
+
+<h2>Continue the path</h2>
+<div class="my-4 grid gap-3 sm:grid-cols-2">
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="lessons/0003-upload-to-build.html">
+    <div class="text-sm font-semibold">3 · From upload to build</div>
+    <div class="text-xs opacity-65">File-before-row, safe unzip, railpack, image_ref</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="lessons/0004-run-to-route.html">
+    <div class="text-sm font-semibold">4 · From run to route</div>
+    <div class="text-xs opacity-65">Limits, probe gate, atomic route, stop/start/restart</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="lessons/0005-auth-request-path.html">
+    <div class="text-sm font-semibold">5 · One authenticated request</div>
+    <div class="text-xs opacity-65">Sessions, CSRF, argon2id, 404-not-403</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="lessons/0006-secrets-and-databases.html">
+    <div class="text-sm font-semibold">6 · Secrets and databases</div>
+    <div class="text-xs opacity-65">AES-256-GCM env, provisioning, schema gate</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="lessons/0007-reliability-and-gaps.html">
+    <div class="text-sm font-semibold">7 · Reliability and current gaps</div>
+    <div class="text-xs opacity-65">Acks, claims, retry ladder, what is not built</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="lessons/0008-console-data-flow.html">
+    <div class="text-sm font-semibold">8 · Console data flow</div>
+    <div class="text-xs opacity-65">Query keys, polling, mutations, log cursor</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="lessons/0009-infrastructure.html">
+    <div class="text-sm font-semibold">9 · Infrastructure</div>
+    <div class="text-xs opacity-65">Compose, networks, Traefik, volumes</div>
+  </a>
+  <a class="rounded-xl border border-base-300 bg-base-200 p-4 transition-colors hover:border-primary" href="lessons/0010-e2e-walkthrough.html">
+    <div class="text-sm font-semibold">10 · End-to-end test suite</div>
+    <div class="text-xs opacity-65">17 scenarios and the invariant each proves</div>
+  </a>
+  <a class="rounded-xl border border-primary bg-base-200 p-4 transition-colors hover:border-primary sm:col-span-2" href="lessons/0011-capstone.html">
+    <div class="text-sm font-semibold">Capstone · Explain without notes</div>
+    <div class="text-xs opacity-65">5-minute whiteboard script, invariant whys, “where is X?” drill, final quiz</div>
   </a>
 </div>
 

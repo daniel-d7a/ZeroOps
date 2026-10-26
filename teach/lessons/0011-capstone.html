@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Capstone — Explain ZeroOps without notes</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Capstone</div>
+<div class="crumbs"><a href="0010-e2e-walkthrough.html">lesson 10</a> · <a href="../reference/architecture.html">architecture (reference)</a> · <a href="../reference/glossary.html">glossary</a></div>
+
+<h1>Capstone: explain ZeroOps without notes</h1>
+<p>This page has no new material. Here you prove the mission. Draw the system. Explain each invariant <em>and its reason</em>. Answer “where is X?” without repository access.</p>
+
+<h2>The 5-minute whiteboard script</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  U["Browser<br>console.localhost:8080"] --> T["Traefik<br>edge"]
+  T -->|"/api"| A["NestJS api"]
+  T -->|"everything else"| W["Vue SPA<br>Caddy"]
+  A -->|"publish build job"| MQ["RabbitMQ"]
+  A --> P[("platform-db")]
+  A --> F[("uploads")]
+  MQ --> B["worker · build"]
+  B --> BK["BuildKit + railpack"]
+  B -->|"image_ref + publish run"| MQ
+  MQ --> R["worker · run"]
+  R --> D["Docker<br>app-deploymentId"]
+  R -->|"probe passes"| RF["/dynamic file"]
+  RF --> T
+  T -->|"slug.localhost"| D
+  R --> P
+  R --> S[("student-db")]
+</pre>
+</div>
+<ol>
+<li><strong>Short summary:</strong> “ZeroOps has a control plane that accepts a zip. A worker fleet builds and runs the zip. An edge proxy gives each app a hostname.”</li>
+<li><strong>Split by trust:</strong> the API handles requests and owns the DB schema and uploads. The worker acts asynchronously and owns the Docker socket and routes. Neither writer changes the transitions of the other.</li>
+<li><strong>Follow one deployment:</strong> signup → project → upload. The upload writes the file first, then the row, then publishes with compensation. The build claims the row, verifies the checksum, unzips safely, runs Railpack, and stores <code>image_ref</code>. The run stage provisions, creates <code>net-&lt;id&gt;</code>, creates the container, probes it, writes the route file atomically, and sets live. Stop, start, and restart use the same pipeline.</li>
+<li><strong>Two important guarantees:</strong> a failed deployment leaves the old version live. The queue tolerates crashes because the ack is manual and claims use CAS steals.</li>
+<li><strong>The edge:</strong> Traefik uses the Docker provider for the console and the file provider for student apps. The console is same-origin, so there is no CORS. Only port 8080 is published.</li>
+</ol>
+
+<h2>Invariants and their reasons</h2>
+<table>
+<tr><th>Invariant</th><th>Reason</th><th>Effect of a violation</th></tr>
+<tr><td>State ownership: the worker writes the transition statuses. The API writes only during a request.</td><td>One writer for each field removes distributed write races without locks.</td><td>Two writers produce contradictory statuses and lost updates.</td></tr>
+<tr><td><code>deployments.image_ref</code> is the only image reference.</td><td>One durable source prevents different tag reconstruction across retries.</td><td>Run pulls a nonexistent tag. Builds and runs disagree.</td></tr>
+<tr><td>The worker checks <code>MIN_SCHEMA_MIGRATION</code>. Migrations belong to the API.</td><td>Old worker code against a new schema is a silent data bug. Fast failure is safer.</td><td>The worker corrupts writes or crashes during a job.</td></tr>
+<tr><td>Use 404, not 403, for the resource of another user.</td><td>A 403 confirms existence and leaks ids across tenants.</td><td>Users can enumerate the projects of other users.</td></tr>
+<tr><td>No Traefik labels on student containers. Use the file provider only.</td><td>The worker controls the exact time that a route appears, after the probe.</td><td>Traefik routes to an unhealthy container. A failed deployment causes downtime.</td></tr>
+<tr><td>Environment values use AES-256-GCM. They are never logged or returned to another user.</td><td>Environment variables contain database URLs and secrets. The DB is not a trust boundary for them.</td><td>A credential leak through a DB dump, logs, or an API response.</td></tr>
+<tr><td>Only the worker and Traefik (read-only) mount the Docker socket.</td><td>The socket is equivalent to root on the host.</td><td>A compromised app or the API escapes the sandbox.</td></tr>
+<tr><td>Student containers join only <code>net-&lt;projectId&gt;</code>.</td><td>The isolation is structural, not a policy.</td><td>Cross-project DB or app access (scenario 08 would fail).</td></tr>
+<tr><td>Messages contain ids only. The worker reloads state from the DB.</td><td>A message cannot contain stale or false state.</td><td>The worker acts on an old snapshot.</td></tr>
+<tr><td>Ack only after the final DB write.</td><td>A crash before the write must cause a redelivery.</td><td>Jobs are lost but look successful.</td></tr>
+<tr><td>Same-origin only. The console splits by host and path.</td><td>There is no CORS surface. Cookies stay same-site. CSRF defenses work.</td><td>CORS misconfiguration and weak cookies.</td></tr>
+</table>
+
+<h2>“Where is X?” rapid exercise</h2>
+<table>
+<tr><th>Question</th><th>Answer</th></tr>
+<tr><td>Where does the API accept and store a zip?</td><td><span class="path">services/api/src/projects/deployments.service.ts</span> and <span class="path">projects.controller.ts</span> — multer → content sniff → sha256 → file → transaction row → publish, with compensation.</td></tr>
+<tr><td>Where does a build start?</td><td><span class="path">services/worker/internal/build/build.go</span> — <code>Handle</code>: claim, checksum, unzip, Railpack, store image, publish run.</td></tr>
+<tr><td>Where is a container created?</td><td><span class="path">services/worker/internal/run/run.go</span> — <code>handleDeploy</code> (limits, network, environment, probe).</td></tr>
+<tr><td>Where is the route file written?</td><td><span class="path">services/worker/internal/route/route.go</span> — temp file and rename after the probe.</td></tr>
+<tr><td>Where are sessions and CSRF handled?</td><td><span class="path">services/api/src/auth/</span> (argon2id, session regenerate) and <span class="path">services/api/src/auth/csrf.guard.ts</span>.</td></tr>
+<tr><td>Where are environment variables encrypted?</td><td><span class="path">services/api/src/common/crypto.ts</span> and <span class="path">services/api/src/projects/env.service.ts</span>. The worker decrypts only at container create.</td></tr>
+<tr><td>Where is the database provisioned?</td><td><span class="path">services/worker/internal/provision/provision.go</span> — role, database, extensions, revoke.</td></tr>
+<tr><td>Where are retries configured?</td><td><span class="path">rabbitmq/definitions.json</span> (30-second TTL, dead queues) and <span class="path">services/worker/internal/queue/</span> (ack and nack logic).</td></tr>
+<tr><td>Where is the console polling?</td><td><span class="path">services/web/src/components/project/</span> — project 2.5 s, deployments 2 s while active. The log cursor loop is in <code>DeploymentsTab.vue</code>.</td></tr>
+<tr><td>Where does the system prevent an old worker from using a new schema?</td><td><span class="path">services/worker/internal/store/store.go</span> — <code>CheckSchema</code> against <code>MIN_SCHEMA_MIGRATION</code>.</td></tr>
+</table>
+
+<h2>Failure-class exercise</h2>
+<table>
+<tr><th>Symptom</th><th>First place to look</th></tr>
+<tr><td>A deployment is stuck in <code>queued</code>.</td><td>Was the message published? Check the queue depth, routing key, and worker roles. Then check the claim query.</td></tr>
+<tr><td>A deployment is stuck in <code>building</code>.</td><td>Read the worker logs, BuildKit health, and unzip or Railpack output. Check for a stale heartbeat that should be stolen.</td></tr>
+<tr><td>The deployment is <code>failed</code> with no error text.</td><td>Check the permanent and transient classification, the failure write path, and the error field.</td></tr>
+<tr><td>The app is live but the URL returns 404.</td><td>Does the route file exist in <code>/dynamic</code>? Is the student container on <code>net-*</code>? Is Traefik on that network? Is the Host header correct?</td></tr>
+<tr><td>The old version still serves after a new deployment.</td><td>This is expected if the new probe failed. Check the new deployment status and the container logs.</td></tr>
+<tr><td>A write returns 401.</td><td>Check the CSRF header and the session before you suspect ownership.</td></tr>
+<tr><td>Login or signup returns 429.</td><td>The auth throttle is 10/min. The tests back off.</td></tr>
+</table>
+
+<h2>Final mixed quiz</h2>
+<div data-quiz='[
+{"q":"A build message is redelivered while the first worker is alive and working. What happens?","options":["two builds run","the second delivery fails the claim CAS and is acked","the message goes to the dead queue","the first worker is killed"],
+ "answer":1,"why":"The claim is compare-and-swap on status and worker. Only the first worker wins. The duplicate is acknowledged as done."},
+{"q":"Where can the system reconstruct a deployment image name?","options":["the message body","the route file","deployments.image_ref","the container name"],
+ "answer":2,"why":"It is the single source. The build role creates the tag one time and stores it."},
+{"q":"Why does upload write the file before the row, then compensate?","options":["to make reads faster","so a DB row never points to a missing file, and a failure unlinks the orphan","because multer requires it","to avoid transactions"],
+ "answer":1,"why":"The opposite order can leave rows that reference missing files. Compensation deletes the file if the transaction fails."},
+{"q":"What makes a failed deployment safe for the live version?","options":["Traefik retries","the route is replaced only after the new probe passes","the old container is never deleted","the build is cached"],
+ "answer":1,"why":"The routing change is the last step. A failure leaves the previous route and container unchanged."},
+{"q":"Which two services can see the Docker socket?","options":["api and worker","worker and traefik (read-only)","traefik and web","worker and buildkit"],
+ "answer":1,"why":"Only the worker changes containers. Traefik finds them read-only."},
+{"q":"A user requests a project id that belongs to another user. What is the correct response?","options":["403 with the project name","404","401","200 with an empty body"],
+ "answer":1,"why":"A 403 leaks existence. The API behaves as if the resource does not exist for that user."},
+{"q":"What happens to a transient build failure after the retry TTL expires two times?","options":["it retries forever","it goes to the dead queue and is marked failed","it is silently acked","it restarts from a new container"],
+ "answer":1,"why":"There are three deliveries in total (initial and two retries). Then the message goes to the dead queue, where the code writes the failure."},
+{"q":"Which check must occur before the system writes a student route?","options":["the build checksum","the HTTP health probe of the new container","the quota check","the migration count"],
+ "answer":1,"why":"The probe gates routing. A failing new container never replaces the live route."},
+{"q":"How does a student container get its network?","options":["the worker attaches it to net-<projectId>","compose puts it on edge","Traefik attaches it","it uses the host network"],
+ "answer":0,"why":"Each project has its own network. Traefik joins that network to route traffic."},
+{"q":"Why does the log viewer use a cursor instead of a cached array?","options":["arrays are slow","logs are an append-only stream, and offsets can skip or duplicate lines","TanStack cannot cache logs","the API has no log route"],
+ "answer":1,"why":"?after=lastId and a capped client window give ordered, deduplicated, bounded log viewing."},
+{"q":"What does M7.4 still lack?","options":["retry ladder","startup reconcile of containers and routes after a restart","CSRF","environment encryption"],
+ "answer":1,"why":"Plan §8.7: the startup reconcile of live containers and route files is the remaining M7 item."}
+]'></div>
+
+<h2>Completion checklist</h2>
+<ul>
+<li>Draw the diagram above from memory, including the three shared networks and the per-project network.</li>
+<li>Follow one deployment from start to finish and name the writer of each status transition.</li>
+<li>Give the <em>reason</em> for at least eight invariants without notes.</li>
+<li>Answer five “where is X?” questions in less than one minute each.</li>
+<li>Diagnose one failure class from its symptom.</li>
+</ul>
+
+<h2>Reference links</h2>
+<p><a href="../index.html">Home</a> · <a href="../reference/architecture.html">Architecture</a> · <a href="../reference/deploy-lifecycle.html">Deploy lifecycle</a> · <a href="../reference/queue-topology.html">Queue topology</a> · <a href="../reference/api-map.html">API map</a> · <a href="../reference/worker-map.html">Worker map</a> · <a href="../reference/glossary.html">Glossary</a></p>
+
+<footer>Plan: <span class="path">plan.md</span> §1 (scope), §8 (lifecycle), §10–11 (hardening and tests). Status: <span class="path">docs/milestones.md</span>, <span class="path">docs/FIXLIST.md</span>.</footer>
+</body>
+</html>

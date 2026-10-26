@@ -6,7 +6,16 @@ Your anti-getting-lost kit for the ZeroOps codebase. Everything cites real files
 0. [`index.html`](index.html) — home / orientation (also the published site root)
 1. [`lessons/0001-architecture-30000ft.html`](lessons/0001-architecture-30000ft.html) — open this first
 2. [`lessons/0002-finite-state-machine.html`](lessons/0002-finite-state-machine.html) — every state, edge, and failure class
-3. [`reference/architecture.html`](reference/architecture.html) — the big map (keep in a tab)
+3. [`lessons/0003-upload-to-build.html`](lessons/0003-upload-to-build.html) — file-before-row, safe unzip, Railpack
+4. [`lessons/0004-run-to-route.html`](lessons/0004-run-to-route.html) — limits, probe gate, atomic route
+5. [`lessons/0005-auth-request-path.html`](lessons/0005-auth-request-path.html) — sessions, CSRF, 404-not-403
+6. [`lessons/0006-secrets-and-databases.html`](lessons/0006-secrets-and-databases.html) — encrypted env, provisioning
+7. [`lessons/0007-reliability-and-gaps.html`](lessons/0007-reliability-and-gaps.html) — acks, claims, retry ladder, gaps
+8. [`lessons/0008-console-data-flow.html`](lessons/0008-console-data-flow.html) — query keys, polling, log cursor
+9. [`lessons/0009-infrastructure.html`](lessons/0009-infrastructure.html) — compose, networks, Traefik
+10. [`lessons/0010-e2e-walkthrough.html`](lessons/0010-e2e-walkthrough.html) — the 17 scenarios
+11. [`lessons/0011-capstone.html`](lessons/0011-capstone.html) — explain it without notes
+12. [`reference/architecture.html`](reference/architecture.html) — the big map (keep in a tab)
 
 ## Reference library (the "where is X handled?" layer)
 - [reference/deploy-lifecycle.html](reference/deploy-lifecycle.html) — zip → live URL, every step annotated

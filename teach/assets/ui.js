@@ -8,8 +8,17 @@
   var groups = [
     { label: 'Lessons', items: [
       { href: up + 'index.html', file: 'index.html', label: 'Home · start here' },
-      { href: up + 'lessons/0001-architecture-30000ft.html', file: '0001-architecture-30000ft.html', label: '1 · The 30,000-ft tour' },
-      { href: up + 'lessons/0002-finite-state-machine.html', file: '0002-finite-state-machine.html', label: '2 · Finite state machine' },
+      { href: up + 'lessons/0001-architecture-30000ft.html', file: '0001-architecture-30000ft.html', label: '1 · Platform overview' },
+      { href: up + 'lessons/0002-finite-state-machine.html', file: '0002-finite-state-machine.html', label: '2 · Deployment states' },
+      { href: up + 'lessons/0003-upload-to-build.html', file: '0003-upload-to-build.html', label: '3 · From upload to build' },
+      { href: up + 'lessons/0004-run-to-route.html', file: '0004-run-to-route.html', label: '4 · From run to route' },
+      { href: up + 'lessons/0005-auth-request-path.html', file: '0005-auth-request-path.html', label: '5 · One authenticated request' },
+      { href: up + 'lessons/0006-secrets-and-databases.html', file: '0006-secrets-and-databases.html', label: '6 · Secrets and databases' },
+      { href: up + 'lessons/0007-reliability-and-gaps.html', file: '0007-reliability-and-gaps.html', label: '7 · Reliability and current gaps' },
+      { href: up + 'lessons/0008-console-data-flow.html', file: '0008-console-data-flow.html', label: '8 · Console data flow' },
+      { href: up + 'lessons/0009-infrastructure.html', file: '0009-infrastructure.html', label: '9 · Infrastructure' },
+      { href: up + 'lessons/0010-e2e-walkthrough.html', file: '0010-e2e-walkthrough.html', label: '10 · End-to-end test suite' },
+      { href: up + 'lessons/0011-capstone.html', file: '0011-capstone.html', label: 'Capstone · Explain without notes' },
     ]},
     { label: 'Reference', items: [
       { href: up + 'reference/architecture.html', file: 'architecture.html', label: 'Architecture map' },

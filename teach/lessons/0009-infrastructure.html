@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 9 — Infrastructure</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 9</div>
+<div class="crumbs"><a href="0008-console-data-flow.html">lesson 8</a> · <a href="0010-e2e-walkthrough.html">lesson 10</a> · <a href="../reference/architecture.html">architecture (reference)</a></div>
+
+<h1>Lesson 9: Infrastructure</h1>
+<p><strong>Objective:</strong> after this lesson, you can draw the compose stack and its three shared networks from memory. You can explain how a request reaches the console. You can explain how a student app gets a URL without a compose service. You can name the volume that each component owns.</p>
+
+<h2>The stack</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  H["Host · port 8080"] --> TR["traefik:v3<br>80 inside container"]
+  TR -->|"console.localhost /api"| API["api · NestJS :3000"]
+  TR -->|"console.localhost /*"| WEB["web · Caddy :80 or Vite :5173"]
+  TR -->|"slug.localhost<br>file provider"| ST["student app<br>app-deploymentId :3000"]
+  API --> PDB[("platform-db")]
+  API --> MQ["rabbitmq"]
+  API --> UPV[("uploads volume")]
+  WK["worker × replicas<br>roles build,run"] --> PDB
+  WK --> SDB[("student-db")]
+  WK --> MQ
+  WK --> BK["buildkit"]
+  WK -->|"writes /dynamic"| TDV[("traefik-dynamic volume")]
+  WK --> DOCK["Docker socket<br>creates student containers"]
+  TR -. reads .-> TDV
+  ST --> NET["net-projectId"]
+  TR -. joins .-> NET
+  SDB -. joins when db .-> NET
+</pre>
+</div>
+
+<h2>Services and their roles</h2>
+<table>
+<tr><th>Service</th><th>Networks</th><th>Published</th><th>Persistent</th><th>Role</th></tr>
+<tr><td><code>platform-db</code></td><td>platform</td><td>—</td><td><code>platform-db-data</code></td><td>It stores users, projects, deployments, actions, environment variables, and sessions.</td></tr>
+<tr><td><code>student-db</code></td><td>db (+ <code>net-*</code> when provisioned)</td><td>—</td><td><code>student-db-data</code></td><td>It contains only student databases. The worker has the admin DSN.</td></tr>
+<tr><td><code>rabbitmq</code></td><td>platform</td><td><code>127.0.0.1:15672</code> UI</td><td><code>rabbitmq-data</code></td><td>It stores durable exchanges and queues from <code>definitions.json</code>.</td></tr>
+<tr><td><code>traefik</code></td><td>edge (+ <code>net-*</code> when routing)</td><td><code>8080:80</code></td><td><code>traefik-dynamic</code></td><td>It is the edge proxy. It uses the Docker provider for the platform and the file provider for student apps. The socket mount is read-only.</td></tr>
+<tr><td><code>api</code></td><td>platform, edge</td><td>—</td><td><code>uploads</code></td><td>It is the REST control plane. It handles sessions, ownership, and queue publishing.</td></tr>
+<tr><td><code>web</code></td><td>edge</td><td>—</td><td>—</td><td>Caddy serves the static SPA build. It has an SPA fallback and security headers.</td></tr>
+<tr><td><code>buildkit</code></td><td>platform</td><td>—</td><td>—</td><td>Railpack uses this build daemon. It is privileged. The config limits the cache.</td></tr>
+<tr><td><code>migrate</code></td><td>platform</td><td>—</td><td>—</td><td>It runs the Drizzle migration one time. <code>api</code> and <code>worker</code> wait for exit code 0.</td></tr>
+<tr><td><code>worker</code></td><td>platform, db</td><td>—</td><td><code>uploads</code> (ro), <code>traefik-dynamic</code>, <code>work</code></td><td>It runs the build and run roles. It is the only service with a writable Docker socket.</td></tr>
+</table>
+
+<h2>Three shared networks and one network per project</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph edge["edge"]
+    T["traefik"]
+    W["web"]
+    A1["api"]
+  end
+  subgraph platform["platform"]
+    A2["api"]
+    WK1["worker"]
+    MQ["rabbitmq"]
+    PDB[("platform-db")]
+    BK["buildkit"]
+  end
+  subgraph db["db"]
+    WK2["worker"]
+    SDB[("student-db")]
+  end
+  subgraph proj["net-projectId"]
+    APP["student app"]
+    T2["traefik"]
+    SDB2["student-db"]
+  end
+  edge ~~~ platform ~~~ db ~~~ proj
+</pre>
+</div>
+<ul>
+<li><strong>edge</strong> faces the host. It contains only Traefik, web, and the API. A student app never joins it.</li>
+<li><strong>platform</strong> carries control-plane traffic: API ↔ broker ↔ worker ↔ platform DB, plus BuildKit.</li>
+<li><strong>db</strong> is the only path to the student-db admin interface. The worker is the only platform service on it.</li>
+<li><strong>net-&lt;projectId&gt;</strong> is created for each project by the worker. The app, Traefik, and (when necessary) student-db join it. Nothing else joins. Two projects share no network, so the isolation is structural, not a firewall policy.</li>
+</ul>
+
+<h2>Traefik: two providers, one port</h2>
+<table>
+<tr><th>Concern</th><th>Configuration</th><th>Result</th></tr>
+<tr><td>Entry point</td><td><code>web</code> on <code>:80</code>, published as host <code>8080</code></td><td>Host port 80 belongs to Apache. Each URL includes <code>:8080</code>.</td></tr>
+<tr><td>Docker provider</td><td><code>exposedByDefault=false</code>, network <code>edge</code></td><td>Only services with <code>traefik.enable=true</code> are routed: api and web.</td></tr>
+<tr><td>Console routing</td><td><code>Host(console.localhost) &amp;&amp; PathPrefix(/api)</code> → api; plain host → web</td><td>The console and API share an origin, so there is no CORS. The API is never exposed on its own hostname.</td></tr>
+<tr><td>File provider</td><td>directory <code>/dynamic</code>, <code>watch: true</code></td><td>The worker writes student routes as YAML files after the probe passes.</td></tr>
+<tr><td>Docker socket</td><td>mounted read-only</td><td>Traefik can find containers but cannot change the daemon.</td></tr>
+</table>
+<p>Each student route file has one router and one service:</p>
+<pre><code>http:
+  routers:
+    proj-&lt;id&gt;:
+      rule: 'Host(`&lt;slug&gt;.localhost`)'
+      entryPoints: [web]
+      service: proj-&lt;id&gt;
+  services:
+    proj-&lt;id&gt;:
+      loadBalancer:
+        servers:
+          - url: http://app-&lt;deploymentId&gt;:3000</code></pre>
+<p>No student container has labels. If a student container has Traefik labels, the invariant is broken.</p>
+
+<h2>State and volumes</h2>
+<table>
+<tr><th>Volume</th><th>Writer</th><th>Reader</th><th>Reason it matters</th></tr>
+<tr><td><code>platform-db-data</code></td><td>Postgres</td><td>—</td><td>It contains all product state. If it is lost, the platform is lost.</td></tr>
+<tr><td><code>student-db-data</code></td><td>Postgres</td><td>—</td><td>It contains student databases. Backups are out of scope.</td></tr>
+<tr><td><code>rabbitmq-data</code></td><td>RabbitMQ</td><td>—</td><td>It keeps durable queues and messages across broker restarts.</td></tr>
+<tr><td><code>uploads</code></td><td>api (rw)</td><td>worker (ro)</td><td>It contains source zips. The API owns the files. The worker only reads them.</td></tr>
+<tr><td><code>work</code></td><td>worker</td><td>—</td><td>It is the extraction and build workspace. The code cleans it for each deployment.</td></tr>
+<tr><td><code>traefik-dynamic</code></td><td>worker</td><td>Traefik</td><td>It contains the route files. The worker writes them atomically with a temp file and a rename.</td></tr>
+</table>
+
+<h2>Startup order and schema ownership</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  PDB["platform-db healthy"] --> MIG["migrate exits 0"]
+  MIG --> API["api starts"]
+  MIG --> WK["worker starts"]
+  MQ["rabbitmq healthy"] --> API
+  MQ --> WK
+  BK["buildkit healthy"] --> WK
+  SDB["student-db healthy"] --> WK
+  WK --> GATE["CheckSchema<br>drizzle migration row count"]
+  GATE -->|"too old"| STOP["refuse to start"]
+</pre>
+</div>
+<ul>
+<li><code>migrate</code> is a one-shot service. It uses the same image as the API and runs <code>dist/db/migrate.js</code>. API and worker wait for <code>service_completed_successfully</code>.</li>
+<li>The worker also refuses to consume jobs when the platform schema is older than <code>MIN_SCHEMA_MIGRATION</code> (currently 6).</li>
+<li>Migrations are the API’s job. All worker SQL is in <code>internal/store</code>.</li>
+</ul>
+
+<h2>RabbitMQ topology is declared, not created by code</h2>
+<p><code>rabbitmq/definitions.json</code> is the authoritative source. The entrypoint starts the broker and waits for the application. Then it imports the definitions at runtime. A boot-time import would drop the user that the environment created. At startup, services check that the queues and exchanges exist. They stop with an error if the definitions were never imported.</p>
+<p>Topology by domain:</p>
+<ul>
+<li><code>build.x → build.q</code>. <code>build.retry.x → build.retry.q</code> has a 30-second TTL and dead-letters back. <code>build.dead.x → build.dead.q</code>.</li>
+<li><code>run.x → run.node-1.q</code>. The routing key is the node id. It has a matching retry and dead pair.</li>
+<li>Prefetch is per channel. Build uses 1 and run uses 4. The worker opens a separate channel for each role.</li>
+</ul>
+
+<h2>Development overlay and host details</h2>
+<table>
+<tr><th>Item</th><th>Command or value</th><th>Effect</th></tr>
+<tr><td>Production-like stack</td><td><code>docker compose up -d --build</code></td><td>It uses built images. Caddy serves the SPA.</td></tr>
+<tr><td>Development stack</td><td><code>docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build</code></td><td>The API runs <code>nest --watch</code> and web runs Vite. The web Traefik port label changes to 5173. Bind mounts replace the image contents.</td></tr>
+<tr><td>Worker scale</td><td><code>docker compose up -d --scale worker=3</code></td><td>More replicas consume the same queues. Claims and CAS make concurrent processing safe.</td></tr>
+<tr><td>Docker address pool</td><td><code>daemon.json.example</code></td><td>Each e2e round creates many <code>net-*</code> bridges. The default pool is empty after approximately 16. The example increases it to <code>10.192.0.0/12</code>.</td></tr>
+<tr><td>Scripts and DNS</td><td><code>curl --resolve console.localhost:8080:127.0.0.1 …</code></td><td>Shells do not resolve wildcard <code>.localhost</code> names. Browsers do.</td></tr>
+<tr><td>Teardown</td><td><code>scripts/down.sh</code></td><td>It runs compose down and stops the labelled student containers.</td></tr>
+</table>
+
+<h2>Speaking exercise (60 seconds)</h2>
+<ol>
+<li>“Traefik is the only published port. It routes the console host to the API or web by Docker labels. It routes student hosts by files that the worker writes.”</li>
+<li>“The platform has three shared networks: edge, platform, and db. Each project gets its own net-&lt;id&gt;. Student containers join only that network.”</li>
+<li>“The API owns the platform schema and the uploads. The worker owns the build and run work, the Docker socket, and the route volume.”</li>
+<li>“Migrations run one time before the API and worker start. The worker refuses an old schema.”</li>
+</ol>
+
+<h2>Quiz: answer from memory</h2>
+<div data-quiz='[
+{"q":"Which service is the only one with a writable Docker socket?","options":["traefik","api","worker","buildkit"],
+ "answer":2,"why":"Traefik mounts the socket read-only. The worker uses the Go SDK to create and stop student containers."},
+{"q":"How does Traefik learn a student app route?","options":["container labels","a YAML file in /dynamic","the platform database","an API webhook"],
+ "answer":1,"why":"Student routing uses the file provider only. The worker writes proj-<id>.yml after the health probe passes."},
+{"q":"Which network does a student container join?","options":["edge","platform","db","only net-<projectId>"],
+ "answer":3,"why":"The isolation is structural. Traefik and student-db join that network. The app does not join a shared network."},
+{"q":"Why does the worker use the db network?","options":["to serve the console","to run provisioning DDL against student-db","to store source zips","to route student apps"],
+ "answer":1,"why":"The worker has the student-db admin DSN and creates the role and database for each project."},
+{"q":"What happens if the platform schema is older than the worker expects?","options":["the worker migrates it","the worker starts anyway","the worker refuses to start","the API rolls back"],
+ "answer":2,"why":"CheckSchema counts the Drizzle migration rows and exits. Migrations belong to the API."}
+]'></div>
+
+<h2>Next lesson</h2>
+<p>Next: <a href="0010-e2e-walkthrough.html">Lesson 10</a>. It shows how the 17 end-to-end scenarios test these components on a real stack.</p>
+
+<footer>Source files: <span class="path">docker-compose.yml</span>, <span class="path">docker-compose.dev.yml</span>, <span class="path">traefik/traefik.yml</span>, <span class="path">rabbitmq/definitions.json</span>, <span class="path">services/worker/internal/config/config.go</span>, <span class="path">services/worker/internal/store/store.go</span> (<code>CheckSchema</code>), <span class="path">scripts/down.sh</span>, <span class="path">daemon.json.example</span>.</footer>
+</body>
+</html>

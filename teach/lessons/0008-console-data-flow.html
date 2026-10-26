@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 — Console data flow</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 8</div>
+<div class="crumbs"><a href="0007-reliability-and-gaps.html">lesson 7</a> · <a href="0009-infrastructure.html">lesson 9</a> · <a href="../reference/api-map.html">api-map (reference)</a></div>
+
+<h1>Lesson 8: Console data flow</h1>
+<p><strong>Objective:</strong> after this lesson, you can select a tab and name each query it uses. You can state how often the query refetches. You can name the mutation that invalidates it. You can also explain why the log viewer needs its own cursor loop instead of the table query.</p>
+
+<h2>Layers</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  R["Vue Router beforeEach<br>['me'] query + requiresAuth / requiresAdmin"] --> V["View<br>ProjectsView · ProjectDetailView · AdminView"]
+  V --> T["Tab component<br>Overview · Deployments · Environment · Files · Database"]
+  T --> Q["TanStack Query hooks<br>query keys + refetchInterval"]
+  Q --> API["api() fetch wrapper<br>credentials include + x-csrf-token"]
+  API --> X["Traefik same-origin /api"]
+  X --> N["NestJS + Postgres"]
+  M["useMutation"] --> API
+  M --> I["invalidateQueries<br>project · projects · deployments · env"]
+</pre>
+</div>
+
+<table>
+<tr><th>Concern</th><th>Location</th><th>Reason</th></tr>
+<tr><td>Session and CSRF bootstrap</td><td><code>router.beforeEach</code>, <code>fetchMe</code>, <code>setCsrfToken</code></td><td>One cached <code>['me']</code> query supplies both the auth routing and the token for each write.</td></tr>
+<tr><td>HTTP</td><td><code>src/api/client.ts</code></td><td>It adds the CSRF header, parses Nest error shapes, and centralizes same-origin credentials.</td></tr>
+<tr><td>Query defaults</td><td><code>src/api/queryClient.ts</code></td><td><code>retry: false</code>, 30-second stale time, and no focus refetch. The UI is not a retry layer. It must not move data while the user reads it.</td></tr>
+<tr><td>Server state</td><td>views and tab components</td><td>Each surface uses its own query key. A mutation invalidates only the affected keys.</td></tr>
+</table>
+
+<h2>Each query, its key, and its interval</h2>
+<table>
+<tr><th>Surface</th><th>Key</th><th>Refetch</th><th>Reason</th></tr>
+<tr><td>Auth and router</td><td><code>['me']</code></td><td>stale time only</td><td>The code fetches it one time for each navigation cache window. Login sets it. Logout clears it.</td></tr>
+<tr><td>Projects list</td><td><code>['projects']</code></td><td>15 s</td><td>Keep the badges correct while actions finish on the server. This is a slow refresh, not a spinner loop.</td></tr>
+<tr><td>Project header</td><td><code>['project', id]</code></td><td><strong>2.5 s, without a condition</strong></td><td>The worker changes <code>status</code> asynchronously. All tabs share the header. This replaced the post-mutation polling freeze (<code>9a3b5ce</code>).</td></tr>
+<tr><td>Deployments history</td><td><code>['deployments', projectId]</code></td><td>2 s while a deployment is active</td><td>A terminal row does not need polling. The query function turns the interval off.</td></tr>
+<tr><td>Log lines</td><td>no query key, cursor loop</td><td>controlled by the deployments refresh</td><td>An append-only cursor (<code>?after=lastId</code>) does not fit a keyed cache. Logs are a stream, not a snapshot.</td></tr>
+<tr><td>Environment variables, sources, and database</td><td><code>['env', id]</code>, <code>['sources', id]</code>, the database tab</td><td>on demand</td><td>Only their own mutations invalidate them. Nothing changes them on the server.</td></tr>
+</table>
+
+<h2>Mutations and invalidation</h2>
+<p>Each action has the same shape. Call the API. Then invalidate the data that the server may have changed. The UI does not use the API response as the new state because the worker finishes asynchronously.</p>
+<table>
+<tr><th>Mutation</th><th>Invalidates</th><th>Detail</th></tr>
+<tr><td>New project</td><td><code>['projects']</code></td><td>Close the form and reset the fields only after success. A server error stays visible.</td></tr>
+<tr><td>Upload or redeploy</td><td>project, projects, deployments</td><td>Upload uses XHR, not fetch, for progress events. The code attaches the CSRF header manually.</td></tr>
+<tr><td>Stop, start, or restart</td><td>project, projects, deployments</td><td>Invalidation causes one immediate refetch. The 2.5-second header poll covers the asynchronous transition.</td></tr>
+<tr><td>Save, delete, or bulk-apply environment variables</td><td><code>['env', id]</code></td><td>Set the local “restart required” flag. Environment changes do not apply to a running container.</td></tr>
+</table>
+
+<h3>Two UI bugs to remember</h3>
+<ul>
+<li><strong>Confirm dialog no-op:</strong> <code>DialogClose</code> runs its own click handler before the parent <code>@click</code>. The code cleared <code>confirmType</code> on <code>update:open</code> and removed it before <code>confirmAction</code> could read it. The fix keeps the type until the confirm handler clears it.</li>
+<li><strong>TanStack structural sharing:</strong> a 2-second refetch of a deep-equal deployment list returns the <em>same object reference</em>. A watch on <code>data</code> stopped the log puller for the full build. The fix watches <code>dataUpdatedAt</code>, which changes after each successful fetch.</li>
+</ul>
+
+<h2>The log viewer is a separate system</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  SEL["select newest deployment<br>or user click"] --> RESET["clear lines, after=0"]
+  RESET --> PULL["GET /deployments/:id/logs?after=lastId<br>500-line batch"]
+  PULL --> APP["push lines, drop front past 1000"]
+  APP --> MORE{"batch was full?"}
+  MORE -->|"yes"| PULL
+  MORE -->|"no"| WAIT["wait for deployments refetch"]
+  WAIT --> ACT{"deployment active?"}
+  ACT -->|"yes"| PULL
+  ACT -->|"terminal"| DRAIN["keep pulling until short batch<br>or 3 terminal ticks"]
+  DRAIN --> DONE["stop"]
+</pre>
+</div>
+<ul>
+<li><strong>Cursor, not offset:</strong> <code>deploy_logs.id</code> is a bigserial. <code>?after=</code> cannot skip or duplicate lines when new rows are appended.</li>
+<li><strong>Bounded DOM:</strong> the server keeps the last 2,000 lines per deployment. The client keeps the last 1,000. A chatty build cannot create tens of thousands of <code>&lt;p&gt;</code> nodes.</li>
+<li><strong>Terminal drain:</strong> a terminal status can change while more than one 500-line batch is buffered. One pull would lose the tail. The loop continues while the last batch was full, or for three ticks after the change.</li>
+<li><strong>Autoscroll watches length, not the array:</strong> <code>push()</code> changes the array in place. A non-deep watch on a ref does not see the change.</li>
+</ul>
+
+<h2>Why there is no store</h2>
+<p>Pinia is installed and registered, but no store exists. No client-owned domain state is worth a copy. The server is the authoritative source. TanStack Query already provides caching, deduplication, stale times, and invalidation. A store would create a second copy of project status that could disagree with the DB.</p>
+<p>The router guard is also intentionally thin. It caches <code>['me']</code> and redirects. It is not the authorization boundary. The API is. A client-side role check only prevents the render of a page that would return 403.</p>
+
+<h2>What SSE will change (not built yet)</h2>
+<p>The fixed intervals exist because the worker writes state asynchronously. The browser has no push channel. FIXLIST Phase 2 plans a fanout exchange and API SSE for deployment transitions, action completions, and runtime logs. Polling stays as the fallback after an EventSource error. Thus the UI continues to work through buffered proxies and reconnect gaps.</p>
+
+<h2>Speaking exercise (60 seconds)</h2>
+<ol>
+<li>“The router starts <code>['me']</code> and the CSRF token. Each tab uses TanStack Query with its own key.”</li>
+<li>“Project status polls every 2.5 seconds without a condition because the worker changes it outside the request. Deployments poll only while they are active.”</li>
+<li>“Mutations invalidate the affected keys. They do not use the response as the final state.”</li>
+<li>“Logs are a cursor stream with a capped window and a terminal drain. They are not a normal query.”</li>
+</ol>
+
+<h2>Quiz: answer from memory</h2>
+<div data-quiz='[
+{"q":"Why does the project header poll without a condition instead of only during deployments?","options":["to keep the browser awake","the worker changes status asynchronously, including after stop, start, and restart","TanStack requires an interval","to refresh the CSRF token"],
+ "answer":1,"why":"The previous conditional polling stopped after action mutations. Unconditional polling is simpler and correct."},
+{"q":"Why does the code not watch the deployment list directly to start log pulls?","options":["arrays cannot be watched","structural sharing returns the same reference for deep-equal data","refetchInterval disables watchers","the log endpoint needs a query key"],
+ "answer":1,"why":"A long building phase refetches identical data, so the reference does not change. dataUpdatedAt does change."},
+{"q":"What happens when the last log batch is full at a terminal status?","options":["The viewer stops.","It keeps pulling until the tail drains.","It reloads the page.","It drops the batch."],
+ "answer":1,"why":"The terminal drain prevents a silent loss of a backlog that is larger than the 500-line batch limit."},
+{"q":"How many log lines does the client keep?","options":["all lines for the session","500","1,000","2,000"],
+ "answer":2,"why":"The server stores the last 2,000 lines. The viewer keeps the last 1,000 to bound the DOM."},
+{"q":"What is the role of the router guard?","options":["It is the authorization boundary.","It redirects for UX only. The API enforces roles.","It validates CSRF tokens.","It creates sessions."],
+ "answer":1,"why":"Vue guards prevent the render of forbidden pages. RolesGuard and the ownership checks in the API are the real enforcement."}
+]'></div>
+
+<h2>Next lesson</h2>
+<p>Next: <a href="0009-infrastructure.html">Lesson 9</a>. It covers the containers and networks below the console.</p>
+
+<footer>Source files: <span class="path">services/web/src/api/{client,queryClient,projects,auth}.ts</span>, <span class="path">services/web/src/router/index.ts</span>, <span class="path">services/web/src/views/{ProjectsView,ProjectDetailView}.vue</span>, <span class="path">services/web/src/components/project/DeploymentsTab.vue</span>, <span class="path">services/web/src/components/project/OverviewTab.vue</span>, <span class="path">services/api/src/projects/deployments.service.ts</span> (<code>listLogs</code>).</footer>
+</body>
+</html>

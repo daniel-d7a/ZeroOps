@@ -88,7 +88,7 @@ graph TD
 <p><code>Ensure()</code>: identifier pattern <code>p_[0-9a-f]{32}</code>; ensure row → if ready skip → CREATE/ALTER ROLE + CREATE DATABASE + REVOKE CONNECT FROM PUBLIC → MarkDatabaseReady. Creds only ever exist via <code>STUDENT_DB_URL</code> in the worker.</p>
 
 <h3>internal/store — every SQL statement in one file</h3>
-<p>See the transition table in <a href="deploy-lifecycle.html#4">deploy-lifecycle §4</a>: <code>ClaimBuild(steal&gt;2min)</code>, <code>MarkBuilt(writes image_ref)</code>, <code>ClaimRun</code>, <code>MarkLive(one tx: live + superseded + project.current)</code>, <code>ReleaseClaim</code>, <code>MarkFailed</code>. Also <code>AppendLogs(2KB clamp)</code>, <code>PruneLogs(keep 2000)</code>, <code>TryProjectLock</code> (<code>pg_try_advisory_lock(hashtext)</code>), <code>EnvVars(key-ordered)</code>, <code>UpsertWorker</code>.</p>
+<p>See the transition table in <a href="deploy-lifecycle.html">deploy-lifecycle §4</a>: <code>ClaimBuild(steal&gt;2min)</code>, <code>MarkBuilt(writes image_ref)</code>, <code>ClaimRun</code>, <code>MarkLive(one tx: live + superseded + project.current)</code>, <code>ReleaseClaim</code>, <code>MarkFailed</code>. Also <code>AppendLogs(2KB clamp)</code>, <code>PruneLogs(keep 2000)</code>, <code>TryProjectLock</code> (<code>pg_try_advisory_lock(hashtext)</code>), <code>EnvVars(key-ordered)</code>, <code>UpsertWorker</code>.</p>
 
 <h2>Config the worker reads</h2>
 <pre>WORKER_ROLES · NODE_ID(node-1) · STUDENT_DB_URL · BUILDKIT_HOST(docker-container://buildkit)

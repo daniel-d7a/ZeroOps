@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 — From upload to build</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 3</div>
+<div class="crumbs"><a href="0002-finite-state-machine.html">lesson 2</a> · <a href="0004-run-to-route.html">lesson 4</a> · <a href="../reference/deploy-lifecycle.html">deploy-lifecycle (reference)</a></div>
+
+<h1>Lesson 3: From upload to build</h1>
+<p><strong>Objective:</strong> after this lesson, you can follow one upload from the HTTP request to a stored <code>image_ref</code>. You can also name the checks that occur before the code writes a byte. You can state the failures that retry, and the reason a publish failure cannot leave a ghost deployment.</p>
+
+<h2>The full path</h2>
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  B["Browser · XHR multipart<br>web/src/api/projects.ts uploadDeployment"] --> C["POST /api/projects/:id/deployments<br>projects.controller.ts upload"]
+  C --> M["multer diskStorage → uploads/tmp/*.part<br>size limit 50 MB"]
+  M --> O["DeploymentsService.uploadZip<br>assertOwned → assertNoActiveDeployment"]
+  O --> S["fromFile content sniff<br>must be application/zip"]
+  S --> H["sha256File"]
+  H --> R["rename(tmp → uploads/project/sourceId.zip)<br>file first, row second"]
+  R --> T["one transaction:<br>insert sources + deployments queued<br>projects.status = deploying"]
+  T --> P["PublisherService.publishBuild<br>mandatory + waitForConfirms"]
+  P --> Q["build.q"]
+  Q --> CB["build.Handle → Store.ClaimBuild<br>queued → building"]
+  CB --> SC["Store.SourceForDeployment<br>path + sha256"]
+  SC --> V["verifyChecksum<br>missing or mismatch = permanent"]
+  V --> U["Extract — safe unzip<br>preflight central directory, then stream"]
+  U --> I{"image proj-id:deployment exists?"}
+  I -->|"yes (crash repair)"| MB
+  I -->|"no"| RA["runRailpack<br>railpack + BuildKit, streamed logs"]
+  RA --> MB["Store.MarkBuilt<br>CAS on worker_id, writes image_ref"]
+  MB --> D["publish run.x → run.node-1.q<br>ids only"]
+  D --> ACK["ack after the final DB write"]
+</pre>
+</div>
+
+<h2>1 · The API: accept, validate, commit, and publish</h2>
+<p>This work occurs before the worker starts. The order is important. If a step fails, the system does not leave a partial deployment.</p>
+
+<table>
+<tr><th>Step</th><th>Guarantee</th><th>Exact code</th></tr>
+<tr><td>Multer writes to <code>uploads/tmp/&lt;uuid&gt;.part</code>. The hard limit is 50 MB.</td><td>The request body does not go to the final source path before validation. The API rejects a large upload before it computes the SHA.</td><td><span class="path">services/api/src/projects/projects.controller.ts</span> — <code>uploadStorage</code>, <code>FileInterceptor</code>; <code>MAX_UPLOAD_BYTES</code></td></tr>
+<tr><td>The API checks ownership and active deployments.</td><td>A foreign project returns 404, never 403. A second upload during an active deployment returns 409. It does not wait in a queue.</td><td><code>assertOwned()</code>, <code>assertNoActiveDeployment()</code> (up to four active statuses)</td></tr>
+<tr><td>The API reads the content type. It does not trust the filename.</td><td>The API rejects an HTML file with a <code>.zip</code> name. A rename does not fool the server.</td><td><code>fromFile(tmp)</code> → <code>mime === 'application/zip'</code></td></tr>
+<tr><td>The API computes SHA-256 during upload.</td><td>The worker can prove that the file it reads is the file that the API accepted. It can detect replacement or corruption on the shared volume.</td><td><code>sha256File()</code></td></tr>
+<tr><td>The API renames the file to <code>uploads/&lt;projectId&gt;/&lt;sourceId&gt;.zip</code>.</td><td>The bytes exist before a database row points to them. A crash can leave an unreferenced file, but it cannot leave a dangling row.</td><td><code>mkdir</code> + <code>rename(tmp, finalPath)</code></td></tr>
+<tr><td>One transaction writes the source row and the deployment row, and changes the project state.</td><td>The source, the deployment, and the user-visible <code>deploying</code> badge become true together.</td><td><code>queueDeployment()</code> with <code>beforeInsert</code>; <code>projects.status = 'deploying'</code></td></tr>
+<tr><td>The API publishes to <code>build.x</code> after the commit.</td><td>The broker has the job before the API says “accepted”. If the publish fails, the API compensates the deployment and the project.</td><td><code>PublisherService.publishBuild()</code>. On error, the code marks the deployment <code>failed</code> and restores the project status.</td></tr>
+</table>
+
+<div class="invariant"><strong>Why does the API compensate instead of publishing inside the transaction?</strong> The broker and Postgres do not share a transaction. The API commits first and compensates if the publish fails. Thus the row exists with a queued job, or the row is visibly failed. A row does not stay in <code>queued</code> when no message exists.</div>
+
+<p><strong>Retention runs inline after each successful upload.</strong> The API keeps the sources of the newest 5 deployments and the live and in-flight sources. It unlinks the other files and soft-deletes their rows. A prune error does not fail the deployment. The deployment already succeeded. The API writes a log entry and continues. The API unlinks the file before it updates the row. Thus a crash can retry the unlink and does not orphan the file.</p>
+<p><strong>Redeploy uses a stored source.</strong> By default, it uses the newest source that is not pruned. The request can set an explicit <code>sourceId</code>. A pruned source or a foreign source returns 404 before the API queues a job.</p>
+
+<h2>2 · The build worker: claim, verify, extract, and build</h2>
+<p>The worker has no state. The message contains ids only. The worker reloads each fact from the database.</p>
+<div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  subgraph msg["Message envelope"]
+    J["{ type: build, deployment_id }"]
+  end
+  J --> CL["ClaimBuild<br>CAS: queued OR stale building heartbeat"]
+  CL --> SRC["SourceForDeployment<br>projectId, zipPath, sha256"]
+  SRC --> CHK["verifyChecksum<br>sha256 on disk"]
+  CHK --> EXT["Extract"]
+  EXT --> BLT["runRailpack"]
+  BLT --> MK["MarkBuilt<br>worker_id CAS"]
+  MK --> PUB["publishDeployJob<br>run.x with node id"]
+</pre>
+</div>
+
+<h3>The claim is the lock</h3>
+<p><code>ClaimBuild</code> is one atomic <code>UPDATE</code>. Its <code>WHERE</code> clause matches only a state that the caller can move: <code>queued</code>, or <code>building</code> with a heartbeat older than 2 minutes. The winner writes <code>worker_id</code> and <code>heartbeat_at</code>. A second replica with a duplicate message gets <code>claimed=false</code>. It must not do the work. Thus a duplicate delivery cannot start two Railpack builds.</p>
+<p>If the claim fails, the handler reads the current status of the row:</p>
+<ul>
+<li><code>built</code>: the deploy publish may be lost after <code>MarkBuilt</code>. Publish the job again. Do not rebuild (repair path).</li>
+<li><code>building</code> with a fresh heartbeat: the owner may be alive. Send the message to the retry exchange with the <em>same attempt</em>. This is a wait, not a retry. It must not use the retry budget.</li>
+<li>Any other status: this is a duplicate delivery. Ack it and do nothing.</li>
+</ul>
+
+<h3>Safe unzip: check the archive before the filesystem</h3>
+<p>The zip is untrusted input. The code checks each rule against the central directory before it writes one byte. A hostile entry cannot pass before the code rejects it:</p>
+<table>
+<tr><th>Rule</th><th>Method</th><th>Failure class</th></tr>
+<tr><td>No path can escape the destination.</td><td><code>filepath.IsLocal</code> rejects <code>/etc/passwd</code>, <code>../x</code>, and <code>a/../../x</code>.</td><td>permanent</td></tr>
+<tr><td>No symlinks, devices, or FIFOs.</td><td>The code checks the file mode. Without this rule, a later entry could write through a planted link.</td><td>permanent</td></tr>
+<tr><td>At most 5,000 files.</td><td>The preflight counts the entries.</td><td>permanent</td></tr>
+<tr><td>At most 200 MB uncompressed.</td><td>The code measures the bytes that it reads. It does not trust the headers.</td><td>permanent when exceeded</td></tr>
+<tr><td>The root has <code>package.json</code>.</td><td>The code collapses a single top-level folder, then checks.</td><td>permanent</td></tr>
+<tr><td>Clean retry.</td><td><code>os.RemoveAll(destDir)</code> runs before extraction.</td><td>—</td></tr>
+</table>
+<p>Only real I/O problems return a normal error and use the retry ladder. A full disk and EIO are examples. Archive problems never use the ladder. A retry cannot repair a zip-slip entry.</p>
+
+<h3>Railpack builds the image</h3>
+<p><code>runRailpack</code> calls Railpack with BuildKit and <code>--progress plain</code>. It suppresses package-manager noise with <code>NPM_CONFIG_LOGLEVEL=error</code>, <code>FUND=false</code>, and <code>AUDIT=false</code>. It streams stdout and stderr to the log table in batches. The builder stops after 10 minutes. Two independent readers and a buffered channel prevent one 10 MB log line from blocking the pipe and causing a timeout.</p>
+<p>On success, the code creates the image tag one time and stores it: <code>proj-&lt;projectId&gt;:&lt;deploymentId&gt;</code>. <strong><code>deployments.image_ref</code> is the only place that contains an image reference.</strong> The run role reads it from the row. No other code creates or guesses the tag.</p>
+
+<h2>Failure handling by branch</h2>
+<table>
+<tr><th>Location</th><th>Failure</th><th>Class</th><th>Result</th></tr>
+<tr><td>API upload</td><td>Not owned, active deployment, not a zip, or more than 50 MB</td><td>request error</td><td>4xx. Nothing is queued.</td></tr>
+<tr><td>API publish</td><td>The broker is unreachable or cannot route the message.</td><td>request error</td><td>The deployment becomes <code>failed</code>. The project status returns to its previous value. The API returns 502.</td></tr>
+<tr><td>Build claim</td><td>A DB error, possibly after the UPDATE applied</td><td>transient</td><td>Best-effort release to <code>queued</code>, then the retry ladder</td></tr>
+<tr><td>Source lookup</td><td>DB error or missing row</td><td>transient or permanent</td><td>Retry ladder, or <code>failed</code> with “missing or pruned”</td></tr>
+<tr><td>Checksum</td><td>File missing or hash mismatch</td><td>permanent</td><td><code>failed</code>. A mismatch means the bytes changed on disk.</td></tr>
+<tr><td>Unzip</td><td>Zip-slip, symlink, too many files, over budget, or no package.json</td><td>permanent</td><td><code>failed</code>, ack</td></tr>
+<tr><td>Unzip</td><td>Full disk or EIO</td><td>transient</td><td>Release, then the retry ladder</td></tr>
+<tr><td>Railpack</td><td>Nonzero exit code from student code</td><td>permanent</td><td><code>failed</code> with “see build logs”</td></tr>
+<tr><td>Railpack</td><td>Timeout or shutdown</td><td>transient</td><td>Release, then the retry ladder</td></tr>
+<tr><td>Log append</td><td>DB error</td><td>transient</td><td>Release, then the retry ladder</td></tr>
+<tr><td>MarkBuilt</td><td>CAS lost</td><td>not a failure</td><td>The stale worker acks and writes nothing.</td></tr>
+<tr><td>Deploy publish</td><td>Broker error</td><td>transient</td><td>The row is already <code>built</code>. A redelivery publishes it again through the repair path.</td></tr>
+</table>
+
+<div class="invariant"><strong>Ack rule:</strong> the worker sends the ack only after the final DB write or after the broker confirms the retry or dead publish. If the worker crashes before the ack, RabbitMQ delivers the message again. This is cheaper than recovery bookkeeping inside the worker.</div>
+
+<h2>Speaking exercise (60 seconds)</h2>
+<ol>
+<li>“The API checks ownership, content type, size, and active deployments. It writes the file before the rows. Then it commits the source, deployment, and project status in one transaction. It publishes with confirms. If the publish fails, it compensates the rows.”</li>
+<li>“The worker claims with a CAS. It reloads the source path and checksum. It checks the zip before it writes any file.”</li>
+<li>“Railpack builds through BuildKit. Logs stream in batches. One CAS writes the tag to <code>image_ref</code>. Then the worker publishes the deploy job. The build is complete, but the app is not live yet.”</li>
+</ol>
+
+<h2>Quiz: answer from memory</h2>
+<div data-quiz='[
+{"q":"What does the API check before it moves an uploaded file to the final source path?","options":["zip contents and package.json","ownership, active deployment, MIME type, size, and sha256","nothing until the worker extracts it","the project slug and quota"],
+ "answer":1,"why":"DeploymentsService checks all of these first. The worker later checks the checksum and the archive safety."},
+{"q":"Why does the code check the zip central directory before extraction?","options":["to make extraction faster","to reject a hostile entry before any byte is written","to compute the image tag","to avoid reading package.json"],
+ "answer":1,"why":"The code does not create a partial write that it must clean up. It rejects the full archive as permanent."},
+{"q":"The file on disk no longer matches the recorded sha256. What happens?","options":["transient, retry the ladder","permanent failure now","skip the checksum and build","busy bounce the message"],
+ "answer":1,"why":"A replaced or corrupted archive will not become correct after a retry. verifyChecksum returns a permanent error."},
+{"q":"A worker finds a built row but no confirmed deploy message. What does it do?","options":["It rebuilds the image.","It marks the row failed.","It publishes the deploy job again.","It waits for the next upload."],
+ "answer":2,"why":"This is the repair path in build.Handle. The worker does not rebuild work that already exists."},
+{"q":"Where does the image tag live after a successful build?","options":["only in the log table","in the AMQP message","in deployments.image_ref","in the route YAML file"],
+ "answer":2,"why":"MarkBuilt stores it. The run role reads it from the row. Messages contain ids only."}
+]'></div>
+
+<h2>Next lesson</h2>
+<p>Continue with <a href="0004-run-to-route.html">Lesson 4</a>. It shows how the built image becomes a live URL. For the branch-level view of the same path, keep <a href="../reference/deploy-lifecycle.html">deploy-lifecycle</a> open.</p>
+
+<footer>Source files: <span class="path">services/api/src/projects/deployments.service.ts</span>, <span class="path">services/api/src/queue/publisher.service.ts</span>, <span class="path">services/worker/internal/build/{build,unzip,railpack}.go</span>, <span class="path">services/worker/internal/store/store.go</span> (<code>ClaimBuild</code>, <code>MarkBuilt</code>, <code>AppendLogs</code>), <span class="path">services/api/src/db/schema.ts</span>.</footer>
+</body>
+</html>
