@@ -4,6 +4,7 @@
   var path = decodeURIComponent(location.pathname);
   var inSub = /\/(lessons|reference)\//.test(path);
   var up = inSub ? '../' : '';
+  var gh = 'https://github.com/daniel-d7a/ZeroOps/blob/main/teach/';
   var groups = [
     { label: 'Lessons', items: [
       { href: up + 'index.html', file: 'index.html', label: 'Home · start here' },
@@ -82,9 +83,9 @@
     });
   });
   menu += '<li class="menu-title mt-3"><span>Workspace</span></li>' +
-    '<li><a href="' + up + 'README.md">Readme</a></li>' +
-    '<li><a href="' + up + 'MISSION.md">Mission</a></li>' +
-    '<li><a href="' + up + 'RESOURCES.md">Resources</a></li>' +
+    '<li><a href="' + gh + 'README.md" target="_blank" rel="noopener">Readme ↗</a></li>' +
+    '<li><a href="' + gh + 'MISSION.md" target="_blank" rel="noopener">Mission ↗</a></li>' +
+    '<li><a href="' + gh + 'RESOURCES.md" target="_blank" rel="noopener">Resources ↗</a></li>' +
     '<li><a href="https://github.com/daniel-d7a/ZeroOps" target="_blank" rel="noopener">Source repo ↗</a></li>';
 
   aside.innerHTML =

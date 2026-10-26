@@ -121,42 +121,45 @@ database, and one project's role cannot connect to another's database.*
   (old rows survive); cross-project role isolation: own role connects, both
   cross-tempts denied `CONNECT privilege`. Tick M5 + README.
 
-## M6 — Vue frontend ⬜
+## M6 — Vue frontend ✅ (gate passed in `389222c`)
 
 *Done when: a user can sign up, create project, upload, watch logs, manage env vars
 and control the project from the UI; an admin can manage users and projects.*
 
-- [ ] **M6.1** — scaffold: Vite + Vue 3 + TS + Pinia + Vue Router + shadcn-vue;
+- [x] **M6.1** — scaffold: Vite + Vue 3 + TS + Pinia + Vue Router + shadcn-vue;
   API client (`credentials: 'include'`, CSRF header), auth guard via `GET /auth/me`.
-- [ ] **M6.2** — login/register, projects list (status badge, URL, last deploy),
+- [x] **M6.2** — login/register, projects list (status badge, URL, last deploy),
   new project form (name, type Node, needs-Postgres checkbox).
-- [ ] **M6.3** — project detail → Overview tab: status, URL, Stop/Start/Restart/
+- [x] **M6.3** — project detail → Overview tab: status, URL, Stop/Start/Restart/
   Redeploy buttons (disabled when N/A, confirmation on Stop/Redeploy), upload dialog;
   poll status every 2–3s while in progress.
-- [ ] **M6.4** — Deployments tab: history + log viewer (poll `after` cursor).
-- [ ] **M6.5** — Environment tab (add/edit/delete + "restart required" banner) and
+- [x] **M6.4** — Deployments tab: history + log viewer (poll `after` cursor).
+- [x] **M6.5** — Environment tab (add/edit/delete + "restart required" banner) and
   Files tab (saved sources + redeploy-from-zip); Database tab (provision status).
-- [ ] **M6.6** — admin pages: users (list/status), projects (all + stop),
+- [x] **M6.6** — admin pages: users (list/status), projects (all + stop),
   workers/overview (heartbeats, deployment counts).
-- [ ] **M6.7** — serve production build from `web` container (Caddy), Vitest login
+- [x] **M6.7** — serve production build from `web` container (Caddy), Vitest login
   test; **[M6 gate]** full UI walkthrough vs plan §9. Tick M6 + README.
 
-## M7 — Hardening and tests ⬜
+## M7 — Hardening and tests [~] (built; gate blocked on M7.4)
 
 *Done when: `scripts/e2e.sh` passes all fixtures and scenarios and the security
 checklist is satisfied.*
 
-- [ ] **M7.1** — fixtures: the 8 zips from plan §11 (`hello-node`, `node-with-db`,
+Status: M7.1–M7.3 + M7.5 shipped (`347ae46`, e2e + fixtures + README).
+M7.4 (startup reconcile) is the only gate item still open.
+
+- [x] **M7.1** — fixtures: the 8 zips from plan §11 (`hello-node`, `node-with-db`,
   `env-echo`, `broken-build`, `no-listen`, `memory-hog`, `zip-slip`, `net-probe`).
-- [ ] **M7.2** — `scripts/e2e.sh`: upload→live, broken build, health-check fail keeps
+- [x] **M7.2** — `scripts/e2e.sh`: upload→live, broken build, health-check fail keeps
   old, stop/start, redeploy after image removal, quotas, retention (files actually
   deleted), retry ladder, duplicate jobs.
-- [ ] **M7.3** — security checklist (plan §10): socket mounts, network isolation
+- [x] **M7.3** — security checklist (plan §10): socket mounts, network isolation
   (one project cannot reach another), cookie flags/CSRF/session lifecycle, 404-not-403,
   env encryption at rest, secrets not committed, no stray host ports.
 - [ ] **M7.4** — startup reconcile (plan §8.7: `desired_state=running` + container
   missing → enqueue `start` after reboot) — deferred from M4.
-- [ ] **M7.5** — README complete (setup, commands, known limitations from plan §10);
+- [x] **M7.5** — README complete (setup, commands, known limitations from plan §10);
   **[M7 gate]**. Tick M7.
 
 ---

@@ -9,6 +9,11 @@ truthfulness, sandboxing, and log growth.
 Priority rule: fix what lies to the user first (stop flow, logs), then add
 what's missing (runtime logs), then harden.
 
+> **Status 2026-10-26.** Phase 1 is nearly done. 1.1a `9a3b5ce`, 1.1b `ef6ba82`,
+> 1.1c `4c59a8d`; 1.2 tail clamp/source suppression/UI window/terminal drain
+> `11de4ee`. Still open in Phase 1: the build-events key-line view (§1.2).
+> Phases 2–3 and the backlog are untouched.
+
 ---
 
 ## Phase 1 — Make it not lie to you (~1–2 days)
