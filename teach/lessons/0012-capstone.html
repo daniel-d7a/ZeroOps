@@ -16,7 +16,7 @@
 </head>
 <body>
 <div class="brand">ZeroOps Teaching Workspace · Capstone</div>
-<div class="crumbs"><a href="0010-e2e-walkthrough.html">lesson 10</a> · <a href="../reference/architecture.html">architecture (reference)</a> · <a href="../reference/glossary.html">glossary</a></div>
+<div class="crumbs"><a href="0010-e2e-walkthrough.html">lesson 10</a> · <a href="0011-startup-reconcile.html">lesson 11</a> · <a href="../reference/architecture.html">architecture (reference)</a> · <a href="../reference/glossary.html">glossary</a></div>
 
 <h1>Capstone: explain ZeroOps without notes</h1>
 <p>This page has no new material. Here you prove the mission. Draw the system. Explain each invariant <em>and its reason</em>. Answer “where is X?” without repository access.</p>
@@ -49,6 +49,7 @@ flowchart LR
 <li><strong>Follow one deployment:</strong> signup → project → upload. The upload writes the file first, then the row, then publishes with compensation. The build claims the row, verifies the checksum, unzips safely, runs Railpack, and stores <code>image_ref</code>. The run stage provisions, creates <code>net-&lt;id&gt;</code>, creates the container, probes it, writes the route file atomically, and sets live. Stop, start, and restart use the same pipeline.</li>
 <li><strong>Two important guarantees:</strong> a failed deployment leaves the old version live. The queue tolerates crashes because the ack is manual and claims use CAS steals.</li>
 <li><strong>The edge:</strong> Traefik uses the Docker provider for the console and the file provider for student apps. The console is same-origin, so there is no CORS. Only port 8080 is published.</li>
+<li><strong>Recovery:</strong> at startup the run role compares <code>desired_state='running'</code> with the real container. It queues one start action when the container is stopped or gone. A project with <code>desired_state='stopped'</code> stays down.</li>
 </ol>
 
 <h2>Invariants and their reasons</h2>
@@ -116,8 +117,8 @@ flowchart LR
  "answer":0,"why":"Each project has its own network. Traefik joins that network to route traffic."},
 {"q":"Why does the log viewer use a cursor instead of a cached array?","options":["arrays are slow","logs are an append-only stream, and offsets can skip or duplicate lines","TanStack cannot cache logs","the API has no log route"],
  "answer":1,"why":"?after=lastId and a capped client window give ordered, deduplicated, bounded log viewing."},
-{"q":"What does M7.4 still lack?","options":["retry ladder","startup reconcile of containers and routes after a restart","CSRF","environment encryption"],
- "answer":1,"why":"Plan §8.7: the startup reconcile of live containers and route files is the remaining M7 item."}
+{"q":"A worker restarts. A project has desired_state running and its container is stopped. What happens?","options":["nothing until the user presses Start","the run role queues one start action","the platform redeploys the zip","the project is marked failed"],
+ "answer":1,"why":"Plan §8.7: startup reconcile compares desired state with the container and queues a start action. It does not redeploy."}
 ]'></div>
 
 <h2>Completion checklist</h2>
@@ -127,6 +128,7 @@ flowchart LR
 <li>Give the <em>reason</em> for at least eight invariants without notes.</li>
 <li>Answer five “where is X?” questions in less than one minute each.</li>
 <li>Diagnose one failure class from its symptom.</li>
+<li>Explain how a running project returns after a worker restart, and why a stopped project stays down.</li>
 </ul>
 
 <h2>Reference links</h2>

@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 11 — Startup reconcile</title>
+<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css" />
+<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+<link rel="stylesheet" href="../assets/style.css">
+<script src="../assets/ui.js" defer></script>
+<script src="../assets/quiz.js" defer></script>
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({ startOnLoad: true, theme: 'dark' });
+</script>
+</head>
+<body>
+<div class="brand">ZeroOps Teaching Workspace · Lesson 11</div>
+<div class="crumbs"><a href="0010-e2e-walkthrough.html">lesson 10</a> · <a href="0012-capstone.html">capstone</a> · <a href="../reference/worker-map.html">worker map (reference)</a></div>
+
+<h1>Lesson 11: Startup reconcile</h1>
+<p><strong>Objective:</strong> after this lesson, you can explain what the worker does at startup. You can trace how a running project comes back after a machine reboot. You can also explain why a stopped project stays stopped.</p>
+
+<h2>Why this duty exists</h2>
+<p>Student containers are not compose services. Docker keeps them on the node, but a machine reboot can leave them stopped. The platform DB still says <code>desired_state='running'</code>. Without a reconcile, the row and the real container disagree forever. The user must press Start.</p>
+<p>The reconcile closes that gap. It compares the desired state in the DB with the real Docker state. It queues a start action only when the project should run and the container does not.</p>
+
+<div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  B["worker starts"] --> C["config + schema gate"]
+  C --> Q["broker open"]
+  Q --> D{"run role?"}
+  D -->|"no"| BUILD["consume build queue only"]
+  D -->|"yes"| R["docker client ready"]
+  R --> L["Reconcile: list desired-running projects on this node"]
+  L --> A{"open action?"}
+  A -->|"yes"| SKIP1["skip"]
+  A -->|"no"| I{"container running?"}
+  I -->|"yes"| SKIP2["skip"]
+  I -->|"no"| N{"has current deployment?"}
+  N -->|"no"| SKIP3["skip: nothing to start"]
+  N -->|"yes"| S["insert start action"]
+  S --> P["publish run.x with node id"]
+  P --> H["run handler executes start"]
+  H --> OK["probe + route + project running"]
+</pre>
+</div>
+
+<h2>Where it sits in startup order</h2>
+<table>
+<tr><th>Step</th><th>What happens</th><th>Code</th></tr>
+<tr><td>1</td><td>Load and validate the environment.</td><td><span class="path">services/worker/internal/config/config.go</span></td></tr>
+<tr><td>2</td><td>Open the platform DB and pass the schema gate.</td><td><code>CheckSchema</code> in <span class="path">services/worker/internal/store/store.go</span></td></tr>
+<tr><td>3</td><td>Open the broker and verify the topology.</td><td><span class="path">services/worker/internal/queue/queue.go</span></td></tr>
+<tr><td>4</td><td>Start the heartbeat loop.</td><td><code>heartbeatLoop</code> in <span class="path">services/worker/cmd/worker/main.go</span></td></tr>
+<tr><td>5</td><td><strong>Run the reconcile, if this replica has the run role.</strong></td><td><code>runRole.Reconcile</code> in <span class="path">services/worker/internal/run/run.go</span></td></tr>
+<tr><td>6</td><td>Start the consume loops.</td><td><code>consumeLoop</code> in <span class="path">services/worker/cmd/worker/main.go</span></td></tr>
+</table>
+<p>The reconcile runs before the run queue is consumed. The start messages that it publishes wait in the queue until the consume loop starts.</p>
+
+<h2>The decision</h2>
+<p>The rule is small. A project needs a start action only when all three conditions are true:</p>
+<ol>
+<li>The project has a current deployment.</li>
+<li>No queued or running action exists for the project.</li>
+<li>The container for that deployment is not running.</li>
+</ol>
+<table>
+<tr><th>Desired state</th><th>Current deployment</th><th>Open action</th><th>Container</th><th>Result</th></tr>
+<tr><td><code>running</code></td><td>yes</td><td>no</td><td>running</td><td>No action. The project is healthy.</td></tr>
+<tr><td><code>running</code></td><td>yes</td><td>no</td><td>stopped or gone</td><td>Queue a start action.</td></tr>
+<tr><td><code>running</code></td><td>yes</td><td>yes</td><td>stopped</td><td>Skip. The open action owns the project.</td></tr>
+<tr><td><code>running</code></td><td>no</td><td>no</td><td>none</td><td>Skip. There is nothing to start.</td></tr>
+<tr><td><code>stopped</code></td><td>yes</td><td>no</td><td>stopped</td><td>Skip. The user wants it stopped.</td></tr>
+</table>
+<p>The pure rule is <code>shouldStart</code>. The unit test is in <span class="path">services/worker/internal/run/reconcile_test.go</span>.</p>
+
+<h2>The steps in code</h2>
+<ol>
+<li><strong>List the candidates.</strong> <code>ReconcileCandidates</code> selects projects with <code>node_id = this node</code> and <code>desired_state = 'running'</code>. It also reports whether an open action exists. See <span class="path">services/worker/internal/store/store.go</span>.</li>
+<li><strong>Inspect the container.</strong> The name is <code>app-&lt;deploymentId&gt;</code>. <code>ContainerRunning</code> returns false for a missing container, so “gone” and “stopped” take the same path. See <span class="path">services/worker/internal/docker/docker.go</span>.</li>
+<li><strong>Insert one start action.</strong> <code>QueueStartAction</code> uses <code>WHERE NOT EXISTS</code> to block a second open action. The partial unique index <code>project_actions_open_idx</code> is the second guard. A conflict returns <code>created=false</code>.</li>
+<li><strong>Publish the job.</strong> <code>PublishAction</code> sends <code>{"type":"action","action_id":...}</code> to <code>run.x</code> with the node id as the routing key. The publish uses confirms and the mandatory flag.</li>
+<li><strong>Compensate on publish failure.</strong> If the publish fails, the worker marks the action <code>failed</code> with the publish error. It does not leave a queued row with no message.</li>
+<li><strong>Run the normal start action.</strong> The run handler starts the stopped container when it exists. When the container is gone, it rebuilds from <code>image_ref</code>. It probes the app, writes the route, and sets the project to <code>running</code>.</li>
+</ol>
+<div class="invariant"><strong>Invariant:</strong> the reconcile never creates a deployment and never rebuilds an image by itself. It only creates a start action. All container work stays in the run handler.</div>
+
+<h2>Why multiple replicas are safe</h2>
+<ul>
+<li>Every run replica on the node can run the reconcile. The DB decides which one wins.</li>
+<li><code>QueueStartAction</code> inserts at most one open start action for a project.</li>
+<li>If two workers both see a stopped container, one insert wins and the other returns <code>created=false</code>.</li>
+<li>If a user action is already open, the reconcile skips the project.</li>
+<li>The start action itself takes the per-project advisory lock, like every other run job.</li>
+</ul>
+
+<h2>What it does not do</h2>
+<table>
+<tr><th>Not handled</th><th>Reason</th></tr>
+<tr><td>Auto-redeploy a crashed app</td><td>Plan §8.7 crash policy: Docker restarts the same image up to 5 times. The platform does not redeploy automatically.</td></tr>
+<tr><td>Rewrite a route when the container is already running</td><td>The route file survives on the shared volume. The container check is the signal.</td></tr>
+<tr><td>Touch a project with <code>desired_state='stopped'</code></td><td>A manual stop must survive a worker restart.</td></tr>
+<tr><td>Reconcile another node’s projects</td><td>Each node has its own <code>run.&lt;node&gt;.q</code> and its own containers.</td></tr>
+<tr><td>Repair an unroutable publish</td><td>That is a separate gap. The reconcile only handles container state.</td></tr>
+</table>
+
+<h2>Failure behavior</h2>
+<table>
+<tr><th>Failure</th><th>Result</th></tr>
+<tr><td>Docker inspect fails for one project</td><td>The worker logs the error and continues with the next project.</td></tr>
+<tr><td>The DB query for candidates fails</td><td>The worker logs <code>startup reconcile failed</code> and still starts its consume loops.</td></tr>
+<tr><td>The action insert fails</td><td>The worker logs the error and continues. The next restart tries again.</td></tr>
+<tr><td>The publish fails</td><td>The action is marked <code>failed</code> with <code>publish failed: ...</code>.</td></tr>
+<tr><td>The start action fails</td><td>The normal action failure path records the error on the action row.</td></tr>
+</table>
+<p>The reconcile is best effort. One bad project must not stop the worker from serving the others.</p>
+
+<h2>Where is X?</h2>
+<table>
+<tr><th>Question</th><th>Answer</th></tr>
+<tr><td>Where is the reconcile started?</td><td><span class="path">services/worker/cmd/worker/main.go</span> — <code>runRole.Reconcile(ctx, cfg.NodeID)</code>, before <code>ConsumeRun</code>.</td></tr>
+<tr><td>Where is the decision rule?</td><td><code>shouldStart</code> in <span class="path">services/worker/internal/run/run.go</span>.</td></tr>
+<tr><td>Where are the candidate projects selected?</td><td><code>ReconcileCandidates</code> in <span class="path">services/worker/internal/store/store.go</span>.</td></tr>
+<tr><td>Where is the start action inserted?</td><td><code>QueueStartAction</code> in the same store file.</td></tr>
+<tr><td>Where is the container state read?</td><td><code>ContainerRunning</code> in <span class="path">services/worker/internal/docker/docker.go</span>.</td></tr>
+<tr><td>Where is the message published?</td><td><code>PublishAction</code> in <span class="path">services/worker/internal/queue/queue.go</span>.</td></tr>
+<tr><td>Where is the end-to-end proof?</td><td><span class="path">scripts/e2e/20-reconcile.sh</span>.</td></tr>
+</table>
+
+<h2>Quiz: answer from memory</h2>
+<div data-quiz='[
+{"q":"Which role runs the startup reconcile?","options":["build only","run only","both roles","the API"],
+ "answer":1,"why":"The run role owns containers and routes. A build-only replica has no Docker client and must not reconcile."},
+{"q":"A project has desired_state running, a current deployment, and a stopped container. What does the reconcile do?","options":["redeploys the zip","queues a start action","marks the project failed","deletes the route"],
+ "answer":1,"why":"It inserts one start action and publishes it to the node run queue. The start action does the container work."},
+{"q":"A project has an open stop action. What does the reconcile do?","options":["queues a start anyway","skips the project","fails the stop","restarts the worker"],
+ "answer":1,"why":"Any queued or running action blocks the reconcile. The open action owns the project."},
+{"q":"Why is a missing container treated the same as a stopped container?","options":["both need a start action","both have no image","both are permanent failures","both skip the probe"],
+ "answer":0,"why":"ContainerRunning returns false when the container is gone. The start action then rebuilds from image_ref."},
+{"q":"Two run replicas start at the same time and both see one stopped container. What prevents two start actions?","options":["the project lock only","the open-action insert guard and unique index","the broker deduplicates messages","the API quota"],
+ "answer":1,"why":"QueueStartAction inserts only when no open action exists. The partial unique index is the second guard."},
+{"q":"The publish of a reconcile start action fails. What happens to the action row?","options":["it stays queued forever","it is marked failed with the publish error","it is deleted","it is marked done"],
+ "answer":1,"why":"The worker compensates: FinishAction records failed, so the row does not look queued with no message."}
+]'></div>
+
+<h2>Next lesson</h2>
+<p>Final lesson: <a href="0012-capstone.html">the capstone</a>. Explain the platform without notes and check yourself.</p>
+
+<footer>Plan: <span class="path">plan.md</span> §8.7. Code: <span class="path">services/worker/cmd/worker/main.go</span>, <span class="path">services/worker/internal/run/run.go</span>, <span class="path">services/worker/internal/store/store.go</span>. Test: <span class="path">scripts/e2e/20-reconcile.sh</span>.</footer>
+</body>
+</html>

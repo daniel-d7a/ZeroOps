@@ -12,10 +12,10 @@
 </head>
 <body>
 <div class="brand">ZeroOps Teaching Workspace · Lesson 10</div>
-<div class="crumbs"><a href="0009-infrastructure.html">lesson 9</a> · <a href="0011-capstone.html">capstone</a> · <a href="../reference/deploy-lifecycle.html">deploy-lifecycle (reference)</a></div>
+<div class="crumbs"><a href="0009-infrastructure.html">lesson 9</a> · <a href="0011-startup-reconcile.html">lesson 11</a> · <a href="0012-capstone.html">capstone</a> · <a href="../reference/deploy-lifecycle.html">deploy-lifecycle (reference)</a></div>
 
 <h1>Lesson 10: The end-to-end test suite</h1>
-<p><strong>Objective:</strong> after this lesson, you can select one of the 17 scenarios and name the invariant it proves. You can name the files that implement the invariant, and you can add a scenario without damage to the suite.</p>
+<p><strong>Objective:</strong> after this lesson, you can select one of the 18 scenarios and name the invariant it proves. You can name the files that implement the invariant, and you can add a scenario without damage to the suite.</p>
 
 <h2>What the suite is</h2>
 <p>The suite is black-box. It operates the running stack over HTTP as a browser does, including the <code>console.localhost</code> host header and CSRF. It also inspects Docker, Postgres, and RabbitMQ when a behavior is not visible from outside. It is not a unit test suite. It does not mock the platform.</p>
@@ -23,7 +23,7 @@
 <pre class="mermaid">
 flowchart TD
   R["scripts/e2e.sh"] --> L{"--list or name filters?"}
-  L -->|"--list"| LIST["print 17 scenarios"]
+  L -->|"--list"| LIST["print 18 scenarios"]
   L -->|"default"| ALL["all scripts/e2e/[0-9]*.sh in order"]
   L -->|"names"| SUB["substring match, run selected"]
   ALL --> CL1["cleanup before round"]
@@ -50,7 +50,7 @@ flowchart TD
 </table>
 <div class="invariant"><strong>Isolation discipline:</strong> each file gets a unique <code>RUN</code> suffix for emails and slugs. Cleanup runs before the round, after each file, and on exit. Without this, a full round of <code>net-*</code> networks empties Docker’s default network pool (about 30 bridges).</div>
 
-<h2>The 17 scenarios</h2>
+<h2>The 18 scenarios</h2>
 <table>
 <tr><th>File</th><th>Invariant it proves</th><th>Code it exercises</th></tr>
 <tr><td><code>01-hello-node</code></td><td>Upload → build → run → probe → route → live. The URL serves the expected body.</td><td>Happy path; <code>build.Handle</code>, <code>handleDeploy</code>, route file.</td></tr>
@@ -70,6 +70,7 @@ flowchart TD
 <tr><td><code>17-retry</code></td><td>With <code>FORCE_TRANSIENT=true</code>, three deliveries occur over at least 60 seconds. Then the job goes to the dead queue and the deployment fails.</td><td>Retry ladder, 30-second TTL, dead queue, give-up write.</td></tr>
 <tr><td><code>18-security</code></td><td>Only worker and traefik mount the socket. Only the expected ports are published. The student container has its own network. Environment values are ciphertext in the DB and never appear in logs. The repository has no tracked secrets.</td><td>Plan §10 checklist across compose and live state.</td></tr>
 <tr><td><code>19-replicas</code></td><td>Multiple worker replicas share the load and process projects in parallel without duplicate state.</td><td>Prefetch, competing consumers, claims across replicas.</td></tr>
+<tr><td><code>20-reconcile</code></td><td>A stopped container for a desired-running project comes back after a worker restart. A user-stopped project stays down.</td><td><code>Reconcile</code>, <code>QueueStartAction</code>, <code>PublishAction</code>, the start action path.</td></tr>
 </table>
 
 <h2>How to run the suite</h2>
@@ -115,7 +116,7 @@ scripts/e2e.sh 05-no-listen         # one file</code></pre>
 ]'></div>
 
 <h2>Next lesson</h2>
-<p>Final lesson: <a href="0011-capstone.html">the capstone</a>. Explain the platform without notes and check yourself.</p>
+<p>Next lesson: <a href="0011-startup-reconcile.html">startup reconcile</a>. Then the <a href="0012-capstone.html">capstone</a>.</p>
 
 <footer>Source files: <span class="path">scripts/e2e.sh</span>, <span class="path">scripts/e2e/common.sh</span>, <span class="path">scripts/e2e/[0-9]*.sh</span>, <span class="path">scripts/e2e/cleanup.sh</span>, <span class="path">docs/FIXLIST.md</span> (verification section).</footer>
 </body>

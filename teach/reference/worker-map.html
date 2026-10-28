@@ -41,6 +41,7 @@ graph TD
 <tr><td><strong>Schema gate:</strong> refuses to start unless <code>drizzle.__drizzle_migrations</code> has ≥6 rows</td><td><code>CheckSchema()</code> in <span class="path">services/worker/internal/store/store.go</span>; const at config.go:19</td></tr>
 <tr><td>Broker <code>Open()</code> — passive exchange/queue verif.</td><td><span class="path">services/worker/internal/queue/queue.go</span></td></tr>
 <tr><td><code>heartbeatLoop()</code> — upsert workers row every 15s</td><td>main.go — <code>heartbeatLoop()</code></td></tr>
+<tr><td><strong>Startup reconcile (run role only):</strong> queue a start for desired-running projects whose container is not running</td><td>main.go — <code>runRole.Reconcile()</code>; <span class="path">services/worker/internal/run/run.go</span></td></tr>
 <tr><td>One consumeLoop goroutine per role; blocks on Wait</td><td>main.go — <code>consumeLoop()</code></td></tr>
 </table>
 
@@ -49,7 +50,7 @@ graph TD
 <h3>internal/queue — the AMQP layer</h3>
 <ul>
   <li><code>ConsumeBuild()</code> / <code>ConsumeRun(cfg.NodeID)</code> — manual ack, per-role <code>Qos</code> (BUILD_PREFETCH=1, RUN_PREFETCH=4)</li>
-  <li><code>PublishDeploy()</code> — to run.x keyed on node id, publisher-confirms + persistent + mandatory</li>
+  <li><code>PublishDeploy()</code> / <code>PublishAction()</code> — to run.x keyed on node id, publisher-confirms + persistent + mandatory</li>
   <li>Retry ladder: <code>MaxAttempts=3</code>, <code>ReadAttempt()</code>, <code>retryDecision()</code> (pure — <span class="path">services/worker/internal/queue/retry_test.go</span>), <code>RetryOrGiveUp()</code> → <code>PublishRetry()</code> / <code>PublishDead()</code> (records <code>x-failure-reason</code>)</li>
 </ul>
 
@@ -68,6 +69,7 @@ graph TD
 <table>
 <tr><th>Function</th><th>File</th><th>What</th></tr>
 <tr><td><code>Handle()</code> → <code>handleDeploy()</code>/<code>handleAction()</code></td><td><span class="path">services/worker/internal/run/run.go</span></td><td>dispatch on message type</td></tr>
+<tr><td><code>Reconcile()</code> / <code>shouldStart()</code></td><td><span class="path">services/worker/internal/run/run.go</span></td><td>startup duty: queue one start when desired-running and the container is not running</td></tr>
 <tr><td><code>replaceContainer()</code></td><td>run.go:274</td><td>network → traefik join → (student-db join) → env decrypt → RunStudent → probe → route.Write → remove old</td></tr>
 <tr><td><code>containerEnv()</code></td><td>run.go:354</td><td>crypt.Decrypt env vars + injects PORT=3000, DATABASE_URL (reserved keys stay invisible to users)</td></tr>
 <tr><td><code>probe()</code> + <code>ProbeTCP()</code></td><td>run.go / docker.go</td><td>60s budget, dial container:3000; fail → old deployment untouched</td></tr>
@@ -101,7 +103,7 @@ MAX_RUNNING_PER_NODE(50) · BUILD_PREFETCH(1) · RUN_PREFETCH(4) · FORCE_TRANSI
   <li><span class="path">services/worker/internal/queue/retry_test.go</span> — 3-strikes decision logic</li>
   <li><span class="path">services/worker/internal/crypt/crypt_test.go</span> — <code>TestDecryptAPIVector</code>, cross-language AES compat</li>
   <li><span class="path">services/worker/internal/run/run_test.go</span> — <code>TestActionSkip</code></li>
-  <li><span class="path">scripts/e2e/</span> — 19 scenario files; e.g. <code>16-worker-kill.sh</code>, <code>17-retry.sh</code></li>
+  <li><span class="path">scripts/e2e/</span> — 18 scenario files; e.g. <code>16-worker-kill.sh</code>, <code>17-retry.sh</code></li>
 </ul>
 
 <footer><a href="queue-topology.html">queue-topology</a> · <a href="deploy-lifecycle.html">deploy-lifecycle</a> · <a href="api-map.html">api-map</a></footer>

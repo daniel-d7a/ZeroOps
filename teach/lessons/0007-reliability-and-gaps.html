@@ -71,7 +71,7 @@ flowchart TD
 <tr><td>The DB is down during a try/catch block.</td><td>The handler returns an error and the worker exits. The message requeues.</td><td>The worker restarts until the DB returns. No job is lost. The system does not report a false success.</td></tr>
 <tr><td>The broker is down at publish time.</td><td>The API upload publish throws. The deployment becomes failed, the project is restored, and the API returns 502.</td><td>The system does not leave a ghost <code>queued</code> row.</td></tr>
 <tr><td>The broker confirms the publish but cannot route it.</td><td><strong>Known gap:</strong> the broker returns the message, but the code writes only a log line. The publish resolves, so the row stays <code>queued</code> and compensation never runs.</td><td>None today. The fix is to throw on the <code>'return'</code> event (FIXLIST §2.3).</td></tr>
-<tr><td>The node reboots while a project should be running.</td><td><strong>Known gap:</strong> the container may be gone, but the row still says <code>running</code>. There is no reconcile at worker or API startup.</td><td>None today (M7.4 / plan §8.7). The user must press Start.</td></tr>
+<tr><td>The node reboots while a project should be running.</td><td>The container may be gone, but the row still says <code>running</code> until a worker starts.</td><td>The run role’s startup reconcile queues a start action when <code>desired_state=running</code> and the container is not running. A project with <code>desired_state=stopped</code> stays down. See lesson 11.</td></tr>
 <tr><td>The platform stack goes down.</td><td>Student containers are not compose services. They can survive as unreachable zombies.</td><td><code>scripts/down.sh</code> stops containers with the <code>platform.project</code> label. A plain <code>docker compose down</code> leaves them.</td></tr>
 <tr><td>Old-container cleanup fails after a good probe.</td><td>The new version is live and routed. The old container remains until the next cleanup.</td><td>The system writes a log entry only. This is deliberate. A retry would probe and reroute again.</td></tr>
 <tr><td>A build runs longer than 2 minutes.</td><td><strong>Known gap:</strong> the heartbeat is written once at claim time and is never refreshed.</td><td>None. An extra duplicate message can steal a live long build. The per-project lock limits the damage (backlog item).</td></tr>
@@ -110,7 +110,6 @@ flowchart TD
 
 <h3>Backlog items</h3>
 <ul>
-<li><strong>Startup reconcile (M7.4):</strong> no code compares <code>desired_state=running</code> with the container state after a reboot.</li>
 <li><strong>BASE_DOMAIN drift:</strong> the Traefik console rules hardcode <code>console.localhost</code>. The worker builds student routes from <code>BASE_DOMAIN</code>. If one value changes and the other does not, half of the system breaks.</li>
 <li><strong>Retry wording drift:</strong> three deliveries and two retries, compared with “3×” in AGENTS.md.</li>
 <li><strong><code>deployments.container_name</code> and <code>attempt</code></strong> are unused columns. No code writes them. Remove them or populate them deliberately.</li>
@@ -124,7 +123,7 @@ flowchart TD
 <li>“Jobs are safe because the broker holds unacked messages. The worker acks only after the final DB write.”</li>
 <li>“Claims are CAS updates. A stale heartbeat permits a steal. A duplicate bounces with the same attempt while the owner is alive.”</li>
 <li>“Phase 1 fixed the incorrect behavior: polling, wedged actions, zombie student containers, and log growth.”</li>
-<li>“Known gaps are: no startup reconcile, no runtime logs or SSE, and an unroutable publish that only logs. The sandbox also uses root with default capabilities.”</li>
+<li>“Known gaps are: no runtime logs or SSE, and an unroutable publish that only logs. The sandbox also uses root with default capabilities.”</li>
 </ol>
 
 <h2>Quiz: answer from memory</h2>

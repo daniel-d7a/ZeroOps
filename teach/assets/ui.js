@@ -18,7 +18,8 @@
       { href: up + 'lessons/0008-console-data-flow.html', file: '0008-console-data-flow.html', label: '8 · Console data flow' },
       { href: up + 'lessons/0009-infrastructure.html', file: '0009-infrastructure.html', label: '9 · Infrastructure' },
       { href: up + 'lessons/0010-e2e-walkthrough.html', file: '0010-e2e-walkthrough.html', label: '10 · End-to-end test suite' },
-      { href: up + 'lessons/0011-capstone.html', file: '0011-capstone.html', label: 'Capstone · Explain without notes' },
+      { href: up + 'lessons/0011-startup-reconcile.html', file: '0011-startup-reconcile.html', label: '11 · Startup reconcile' },
+      { href: up + 'lessons/0012-capstone.html', file: '0012-capstone.html', label: 'Capstone · Explain without notes' },
     ]},
     { label: 'Reference', items: [
       { href: up + 'reference/architecture.html', file: 'architecture.html', label: 'Architecture map' },
