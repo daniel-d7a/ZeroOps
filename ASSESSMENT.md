@@ -11,7 +11,7 @@ production risks, a scaling plan to ~1000 users, and where to take it next.
   per-project networks. Most student projects skip this rigor; here it is
   enforced *and* tested.
 - The e2e suite is the crown jewel — real HTTP, real RabbitMQ, real Docker,
-  17 scenarios, ~10 min, self-cleaning. It caught two genuine bugs
+  18 scenarios, ~10 min, self-cleaning. It caught two genuine bugs
   (worker-kill message loss, Docker address-pool exhaustion).
 - Error taxonomy (permanent vs transient vs busy) + retry ladder to a dead
   queue is production-grade thinking, not tutorial code.
@@ -130,4 +130,4 @@ bet).
 
 ---
 
-*M0–M7 complete. E2E gate: 17/17 scenarios green (`./scripts/e2e.sh`).*
+*M0–M7 complete. E2E gate: 18/18 scenarios green (`./scripts/e2e.sh`).*

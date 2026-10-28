@@ -8,13 +8,12 @@ Spec: `plan.md`. Agent operating manual: `AGENTS.md`.
 
 ## Status
 
-Milestones **M0–M6 complete**; **M7 built and tested** (`scripts/e2e.sh`, 17
-scenarios) with one hardening gap left: startup reconcile (M7.4, plan §8.7).
-The console covers everything in plan §9: auth, projects list (status, URL,
-last deploy), project detail with tabs (overview actions + drag-and-drop upload
-with progress, deployment history with source filenames + log viewer,
-`.env`-style environment editor with atomic bulk apply, saved files, database
-status) and the role-gated admin pages (users, projects, system). Phase 2
+Milestones **M0–M7 complete** (`scripts/e2e.sh`, 18 scenarios), including
+startup reconcile after a node restart (plan §8.7). The console covers
+everything in plan §9: auth, projects list (status, URL, last deploy),
+project detail with tabs (overview actions + drag-and-drop upload with
+progress, deployment history with source filenames + log viewer, `.env`-style
+environment editor with atomic bulk apply, saved files, database status) and the role-gated admin pages (users, projects, system). Phase 2
 (runtime logs + SSE) and the remaining sandbox work are tracked in
 `docs/FIXLIST.md`; progress lives in `docs/milestones.md`.
 

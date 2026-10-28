@@ -240,6 +240,20 @@ func (c *Client) StartContainer(ctx context.Context, name string) (ok bool, err 
 	return true, nil
 }
 
+// ContainerRunning reports whether a named container is running. A missing
+// container is (false, nil): the startup reconcile treats "gone" and "stopped"
+// the same way — both need a start action.
+func (c *Client) ContainerRunning(ctx context.Context, name string) (bool, error) {
+	info, err := c.cli.ContainerInspect(ctx, name)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect %s: %w", name, err)
+	}
+	return info.State != nil && info.State.Running, nil
+}
+
 // RemoveProjectImages removes the project's built images (tags proj-<id>:*)
 // except those in keep (plan §8.2 step 6: keep the live image and the one
 // before it — a restart of the superseded deployment still needs its image).

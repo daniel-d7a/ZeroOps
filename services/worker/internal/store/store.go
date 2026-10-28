@@ -554,6 +554,67 @@ func (s *Store) SetProjectState(ctx context.Context, projectID, desired, status 
 	return nil
 }
 
+// --- startup reconcile (plan §8.7) -----------------------------------------
+
+// ReconcileCandidate is one project this node should check after a restart:
+// the project may still want to run, but its container may be gone.
+// OpenAction is true when any queued/running action already exists — the
+// reconciler must not add another one.
+type ReconcileCandidate struct {
+	ProjectID    string
+	DeploymentID string // current_deployment_id ("" if never deployed)
+	OpenAction   bool
+}
+
+// ReconcileCandidates lists the desired-running projects assigned to this
+// node. The caller checks Docker state; SQL only answers "what should run?".
+func (s *Store) ReconcileCandidates(ctx context.Context, nodeID string) ([]ReconcileCandidate, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT p.id::text,
+		       COALESCE(p.current_deployment_id::text, ''),
+		       EXISTS (
+		           SELECT 1 FROM project_actions a
+		           WHERE a.project_id = p.id AND a.status IN ('queued', 'running'))
+		FROM projects p
+		WHERE p.node_id = $1 AND p.desired_state = 'running'
+		ORDER BY p.created_at, p.id`, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("list reconcile candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []ReconcileCandidate
+	for rows.Next() {
+		var c ReconcileCandidate
+		if err := rows.Scan(&c.ProjectID, &c.DeploymentID, &c.OpenAction); err != nil {
+			return nil, fmt.Errorf("scan reconcile candidate: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// QueueStartAction inserts the start action for a project unless an open
+// action already exists (plan §8.7: skipped if an open one exists). The
+// partial unique index also blocks a duplicate open start under a race, so
+// ON CONFLICT is the second guard. created=false means another request won.
+func (s *Store) QueueStartAction(ctx context.Context, projectID string) (actionID string, created bool, err error) {
+	err = s.pool.QueryRow(ctx, `
+		INSERT INTO project_actions (project_id, type, status)
+		SELECT $1, 'start', 'queued'
+		WHERE NOT EXISTS (
+		    SELECT 1 FROM project_actions
+		    WHERE project_id = $1 AND status IN ('queued', 'running'))
+		ON CONFLICT DO NOTHING
+		RETURNING id::text`, projectID).Scan(&actionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("queue start action: %w", err)
+	}
+	return actionID, true, nil
+}
+
 // EnvVar is one env_vars row with the value still encrypted — decryption is
 // the run role's job (plan §8.2 step 3); this package never sees plaintext.
 type EnvVar struct {

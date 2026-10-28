@@ -108,7 +108,7 @@ handling.
       stop/start/restart/redeploy
 - [x] **M5** Database and env vars
 - [x] **M6** Vue frontend (user + admin)
-- [~] **M7** Hardening and tests (plan §10 + §11), README complete — remaining: M7.4 startup reconcile (plan §8.7)
+- [x] **M7** Hardening and tests (plan §10 + §11), README complete
 
 Update the checkbox when a milestone gate passes.
 

@@ -37,6 +37,17 @@ done
 echo "cleanup: removed $removed_c app containers, $removed_n net-* networks"
 [ -n "$kept" ] && echo "cleanup: kept (still in use):$kept"
 
+# 3. stop reviving old test projects: the startup reconcile (plan §8.7)
+# starts every desired-running project whose container is gone. Cleanup just
+# removed those containers, so mark the rows stopped too. Best effort: the
+# stack may already be down when this runs manually.
+DBU=$(grep -m1 '^PLATFORM_DB_USER=' .env 2>/dev/null | cut -d= -f2-)
+DBN=$(grep -m1 '^PLATFORM_DB_NAME=' .env 2>/dev/null | cut -d= -f2-)
+if docker compose exec -T platform-db psql -U "${DBU:-zeroops}" -d "${DBN:-zeroops}" \
+  -c "UPDATE projects SET desired_state = 'stopped' WHERE desired_state = 'running'" >/dev/null 2>&1; then
+  echo "cleanup: marked running projects stopped"
+fi
+
 # --- headroom report: how close are we to pool exhaustion? ------------------
 left=$(docker network ls --format '{{.Name}}' | grep -cE '^net-')
 bridges=$(docker network ls --format '{{.Name}} {{.Driver}}' \

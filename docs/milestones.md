@@ -141,13 +141,13 @@ and control the project from the UI; an admin can manage users and projects.*
 - [x] **M6.7** — serve production build from `web` container (Caddy), Vitest login
   test; **[M6 gate]** full UI walkthrough vs plan §9. Tick M6 + README.
 
-## M7 — Hardening and tests [~] (built; gate blocked on M7.4)
+## M7 — Hardening and tests [x]
 
 *Done when: `scripts/e2e.sh` passes all fixtures and scenarios and the security
 checklist is satisfied.*
 
-Status: M7.1–M7.3 + M7.5 shipped (`347ae46`, e2e + fixtures + README).
-M7.4 (startup reconcile) is the only gate item still open.
+Status: M7.1–M7.5 shipped (`347ae46`, e2e + fixtures + README). M7.4
+(startup reconcile) is now implemented and covered by `20-reconcile`.
 
 - [x] **M7.1** — fixtures: the 8 zips from plan §11 (`hello-node`, `node-with-db`,
   `env-echo`, `broken-build`, `no-listen`, `memory-hog`, `zip-slip`, `net-probe`).
@@ -157,8 +157,8 @@ M7.4 (startup reconcile) is the only gate item still open.
 - [x] **M7.3** — security checklist (plan §10): socket mounts, network isolation
   (one project cannot reach another), cookie flags/CSRF/session lifecycle, 404-not-403,
   env encryption at rest, secrets not committed, no stray host ports.
-- [ ] **M7.4** — startup reconcile (plan §8.7: `desired_state=running` + container
-  missing → enqueue `start` after reboot) — deferred from M4.
+- [x] **M7.4** — startup reconcile (plan §8.7: `desired_state=running` + container
+  missing → enqueue `start` after reboot).
 - [x] **M7.5** — README complete (setup, commands, known limitations from plan §10);
   **[M7 gate]**. Tick M7.
 

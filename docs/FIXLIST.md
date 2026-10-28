@@ -159,8 +159,6 @@ compensating-write path can never fire.
 - **BASE_DOMAIN drift**: Traefik hardcodes `Host(console.localhost)`
   (`docker-compose.yml:105,119`) while workers build student routes from
   `${BASE_DOMAIN}` — change BASE_DOMAIN and only half the system follows.
-- **Startup reconcile** (plan §8.7 unimplemented): rebooted node with
-  `desired_state=running` + dead container drifts permanently.
 - **Quota races**: 3-project/50-var checks are check-then-act, no DB arbiter
   (`projects.service.ts:20-25`, `env.service.ts:59-63,114`).
 - **Dead columns**: `deployments.container_name`/`attempt` written by nobody
@@ -218,6 +216,6 @@ idle sleep, metrics, rollbacks UI, email, billing.
 
 - Unit: `cd services/api && npm test`, `cd services/worker && go test ./...`,
   `cd services/web && npm test` after each phase.
-- Full gate: `./scripts/e2e.sh` (17 scenarios, ~10 min) at phase boundaries.
+- Full gate: `./scripts/e2e.sh` (18 scenarios, ~10 min) at phase boundaries.
 - Key e2e touchpoints: `13-lifecycle.sh` (stop flow), `14-*`/retention,
   `17-retry.sh` (retry ladder), `18-security.sh` (sandbox changes).

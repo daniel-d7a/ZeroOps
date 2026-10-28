@@ -91,6 +91,64 @@ func (handler *Handler) Handle(ctx context.Context, delivery amqp091.Delivery) e
 	}
 }
 
+// shouldStart is the plan §8.7 decision: a project needs a start action when
+// it has a deployment, nobody has an open action, and the container is not
+// running. Split out so the rule is unit-tested without Docker or Postgres.
+func shouldStart(deploymentID string, openAction, running bool) bool {
+	return deploymentID != "" && !openAction && !running
+}
+
+// Reconcile is the runner-role startup duty (plan §8.7). It brings projects
+// back after a machine reboot: for each desired-running project on this node,
+// inspect the current deployment's container and queue a start action when it
+// is stopped or gone. It never redeploys and never touches a project with an
+// open action. Best effort: one bad project must not stop the worker, so
+// failures are logged and the loop continues.
+func (handler *Handler) Reconcile(ctx context.Context, nodeID string) error {
+	candidates, err := handler.Store.ReconcileCandidates(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	queued := 0
+	for _, candidate := range candidates {
+		logger := handler.Logger.With("project_id", candidate.ProjectID, "node_id", nodeID)
+		if candidate.OpenAction {
+			continue // plan §8.7: skip when an action is already open
+		}
+		running := false
+		if candidate.DeploymentID != "" {
+			running, err = handler.Docker.ContainerRunning(ctx, containerName(candidate.DeploymentID))
+			if err != nil {
+				logger.Error("reconcile: cannot inspect container", "error", err)
+				continue
+			}
+		}
+		if !shouldStart(candidate.DeploymentID, candidate.OpenAction, running) {
+			continue
+		}
+
+		actionID, created, err := handler.Store.QueueStartAction(ctx, candidate.ProjectID)
+		if err != nil {
+			logger.Error("reconcile: cannot queue start", "error", err)
+			continue
+		}
+		if !created {
+			continue // another worker or a user request got there first
+		}
+		if err := handler.Broker.PublishAction(ctx, nodeID, actionID); err != nil {
+			logger.Error("reconcile: cannot publish start", "action_id", actionID, "error", err)
+			if finishErr := handler.Store.FinishAction(ctx, actionID, "failed", "publish failed: "+err.Error()); finishErr != nil {
+				logger.Error("reconcile: cannot fail unpublished action", "action_id", actionID, "error", finishErr)
+			}
+			continue
+		}
+		queued++
+		logger.Info("reconcile: start queued", "action_id", actionID, "deployment_id", candidate.DeploymentID)
+	}
+	handler.Logger.Info("reconcile done", "node_id", nodeID, "checked", len(candidates), "queued", queued)
+	return nil
+}
+
 // handleDeploy: plan §8.2 — turn a built deployment into a live one.
 func (handler *Handler) handleDeploy(ctx context.Context, delivery amqp091.Delivery, job jobMessage) error {
 	logger := handler.Logger.With("deployment_id", job.DeploymentID)

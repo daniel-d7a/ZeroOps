@@ -145,6 +145,13 @@ func main() {
 			StudentDBContainer: cfg.StudentDBContainer,
 			EncryptionKey:      cfg.EncryptionKey,
 		}
+		// Startup reconcile (plan §8.7) runs before consuming: queue a start
+		// for desired-running projects whose container died with the machine.
+		// Best effort — a reconcile failure must not stop the worker.
+		if err := runRole.Reconcile(ctx, cfg.NodeID); err != nil {
+			logger.Error("startup reconcile failed", "error", err)
+		}
+
 		runQueueName := "run." + cfg.NodeID + ".q"
 		runDeliveries, err := broker.ConsumeRun(cfg.NodeID, cfg.RunPrefetch)
 		if err != nil {

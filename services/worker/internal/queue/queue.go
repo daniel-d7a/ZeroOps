@@ -128,21 +128,36 @@ func (c *Conn) consume(queueName string, prefetch int) (<-chan amqp091.Delivery,
 
 // PublishDeploy hands the finished build to the run role: the message goes to
 // the run.x exchange with the project's node id as routing key (direct
-// exchange → only that node's queue receives it). mandatory + confirm as
-// described in the package docs: nil here means the broker durably has it.
+// exchange → only that node's queue receives it).
 func (c *Conn) PublishDeploy(ctx context.Context, nodeID, deploymentID string) error {
-	body, err := json.Marshal(map[string]string{"type": "deploy", "deployment_id": deploymentID})
+	return c.publishJob(ctx, nodeID, map[string]string{
+		"type": "deploy", "deployment_id": deploymentID,
+	}, deploymentID)
+}
+
+// PublishAction queues a stop/start/restart on the same run exchange. The
+// startup reconcile uses it for the start actions it creates (plan §8.7).
+func (c *Conn) PublishAction(ctx context.Context, nodeID, actionID string) error {
+	return c.publishJob(ctx, nodeID, map[string]string{
+		"type": "action", "action_id": actionID,
+	}, actionID)
+}
+
+// publishJob is the shared run.x publish: mandatory + confirm, so nil means
+// the broker durably has the message (package docs).
+func (c *Conn) publishJob(ctx context.Context, nodeID string, payload map[string]string, messageID string) error {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
 	deferredConfirm, err := c.publishChannel.PublishWithDeferredConfirmWithContext(ctx, "run.x", nodeID, true, false, amqp091.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp091.Persistent, // survives a broker restart
-		MessageId:    deploymentID,       // for tracing/debugging in the broker
+		MessageId:    messageID,          // for tracing/debugging in the broker
 		Body:         body,
 	})
 	if err != nil {
-		return fmt.Errorf("publish deploy: %w", err)
+		return fmt.Errorf("publish job: %w", err)
 	}
 	// Wait for the broker's confirm before telling the caller "published".
 	confirmed, err := deferredConfirm.WaitContext(ctx)
